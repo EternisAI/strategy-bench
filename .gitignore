@@ -1,0 +1,174 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+*/venv/
+*/env/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+test-results/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# API Keys (extra protection)
+*api_key*
+*API_KEY*
+secrets.yaml
+secrets.json
+
+# Experiments & Outputs
+experiments/*/
+!experiments/.gitkeep
+logs/
+outputs/
+results/
+tournaments/*/
+!tournaments/.gitkeep
+checkpoints/
+runs/
+wandb/
+
+# Game Logs
+*.jsonl
+*.log
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# OS-specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.bak
+*.tmp
+
+# Documentation builds
+docs/_build/
+docs/_static/
+docs/_templates/
+site/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+temp/
+tmp/
+.temp/
+
+# Large model files
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+
+# Data files (if large)
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.feather
+
+# Compiled files
+*.o
+*.a
+*.lib
+*.dll
+*.dylib
+
+# Package manager
+poetry.lock
+Pipfile.lock
+
+# Keep empty directories
+!.gitkeep
+!**/.gitkeep
+
