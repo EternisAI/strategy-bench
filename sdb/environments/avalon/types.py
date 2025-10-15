@@ -29,6 +29,7 @@ class Team(str, Enum):
 class Phase(str, Enum):
     """Game phases."""
     TEAM_SELECTION = "team_selection"
+    TEAM_DISCUSSION = "team_discussion"  # NEW: Pre-proposal discussion
     TEAM_VOTING = "team_voting"
     QUEST_VOTING = "quest_voting"
     ASSASSINATION = "assassination"
@@ -76,6 +77,22 @@ class QuestResult:
     success_votes: int
     fail_votes: int
     succeeded: bool
+
+
+@dataclass
+class DiscussionStatement:
+    """A statement made during team discussion.
+    
+    Attributes:
+        speaker_id: Player ID who made the statement
+        statement: The discussion statement text
+        quest_num: Which quest this statement was for
+        round_num: Which proposal round this was for
+    """
+    speaker_id: int
+    statement: str
+    quest_num: int
+    round_num: int
 
 
 @dataclass

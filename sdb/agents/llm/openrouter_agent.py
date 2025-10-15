@@ -1,6 +1,8 @@
-"""LLM agent using OpenRouter API."""
+"""Generic LLM agent using OpenRouter API - works with all game environments."""
 
 import asyncio
+import json
+import re
 from typing import Any, Dict, List, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -13,10 +15,11 @@ from sdb.memory.belief_tracker import BeliefTracker
 
 
 class OpenRouterAgent(BaseAgent):
-    """Agent that uses OpenRouter API for decision making.
+    """Generic agent that uses OpenRouter API for decision making.
     
     This agent maintains short-term memory and belief tracking,
-    and uses LLM reasoning to choose actions.
+    and uses LLM reasoning to choose actions. It works with any game
+    environment that provides clear instructions in observations.
     """
     
     def __init__(
@@ -74,10 +77,13 @@ When making decisions:
 2. Consider what other players' actions reveal about their roles
 3. Plan your actions strategically
 4. Adapt your strategy based on new information
+5. Always respond with valid JSON as specified in the instructions
 
-Respond in the following format:
-[Reasoning]: <your thought process>
-[Action]: <the action you will take>
+Response Format:
+- Read the instruction carefully to understand the required JSON format
+- Provide your reasoning first (optional)
+- Then provide the JSON action exactly as specified
+- Example: {{"type": "action_name", "parameter": value}}
 """
     
     def act(self, observation: Observation) -> Action:
@@ -131,7 +137,7 @@ Respond in the following format:
         Raises:
             AgentError: If LLM fails after all retries
         """
-        # Store observation in memory with context
+        # Store observation in memory
         event_summary = self._summarize_observation(observation)
         self.memory.add(
             content=event_summary,
@@ -141,7 +147,7 @@ Respond in the following format:
         # Update beliefs based on observation
         self._update_beliefs_from_observation(observation)
         
-        # Build prompt from observation (includes memories and beliefs)
+        # Build prompt from observation
         prompt = self._build_action_prompt(observation)
         
         # Add to conversation
@@ -156,7 +162,7 @@ Respond in the following format:
                 messages=self.conversation_history[-15:]  # Keep context manageable
             )
             
-            # Log to terminal [[memory:7216156]]
+            # Log to terminal
             print(f"      🤖 {self.name} thinks: {response.content[:80]}...")
             
             # Parse action from response
@@ -189,43 +195,6 @@ Respond in the following format:
                 details={"player_id": self.player_id, "observation": str(observation.data)[:200]}
             )
     
-    def _observation_to_text(self, observation: Observation) -> str:
-        """Convert observation to text prompt.
-        
-        Args:
-            observation: Observation to convert
-            
-        Returns:
-            Text representation
-        """
-        text_parts = [
-            f"Phase: {observation.phase.name}",
-            f"Your ID: {observation.player_id}",
-        ]
-        
-        # Add observation data
-        for key, value in observation.data.items():
-            text_parts.append(f"{key}: {value}")
-        
-        # Add recent memories
-        recent_memories = self.memory.get_recent(n=5)
-        if recent_memories:
-            text_parts.append("\nRecent events:")
-            for mem in recent_memories:
-                text_parts.append(f"  - {mem.content}")
-        
-        # Add high-confidence beliefs
-        high_conf_beliefs = self.beliefs.get_high_confidence_beliefs(threshold=0.7)
-        if high_conf_beliefs:
-            text_parts.append("\nYour beliefs:")
-            for belief in high_conf_beliefs:
-                text_parts.append(
-                    f"  - Player {belief.subject} {belief.predicate} "
-                    f"(confidence: {belief.confidence:.2f})"
-                )
-        
-        return "\n".join(text_parts)
-    
     def _summarize_observation(self, observation: Observation) -> str:
         """Create human-readable summary of observation for memory.
         
@@ -235,119 +204,66 @@ Respond in the following format:
         Returns:
             Summary string
         """
-        phase = observation.phase.name if hasattr(observation, 'phase') else "UNKNOWN"
-        action = observation.data.get("action_required", "observe")
+        phase = observation.phase if isinstance(observation.phase, str) else observation.phase.name
+        obs_type = observation.obs_type
         
-        if action == "nominate_chancellor":
-            return f"[{phase}] I am President, must nominate a Chancellor"
-        elif action == "vote":
-            pres = observation.data.get('president', '?')
-            nom = observation.data.get('nominee', '?')
-            return f"[{phase}] President {pres} nominated Player {nom} for Chancellor"
+        # Try to extract key info for summary
+        summary_parts = [f"[{phase}]"]
+        
+        if observation.data.get("instruction"):
+            # Extract first sentence of instruction for summary
+            instruction = observation.data["instruction"]
+            first_sentence = instruction.split('.')[0] if '.' in instruction else instruction[:50]
+            summary_parts.append(first_sentence)
+        elif obs_type == "observe":
+            summary_parts.append("Observing game state")
         else:
-            return f"[{phase}] Observing game state"
+            summary_parts.append("Action required")
+        
+        return " ".join(summary_parts)
     
     def _update_beliefs_from_observation(self, observation: Observation) -> None:
         """Update beliefs about other players based on observations.
         
+        This is a generic belief update that looks for common patterns
+        across different games (team info, role reveals, etc.).
+        
         Args:
             observation: Current observation
         """
-        # Update beliefs based on known fascists (from role info)
-        if 'fascist_team' in observation.data:
-            for player_id in observation.data['fascist_team']:
-                if player_id != self.player_id:
+        # Update beliefs based on team information
+        team_keys = ['team', 'fascist_team', 'evil_team', 'werewolves', 'fellow_impostors']
+        for key in team_keys:
+            if key in observation.data:
+                team_members = observation.data[key]
+                if isinstance(team_members, list):
+                    for member_id in team_members:
+                        if member_id != self.player_id:
+                            self.beliefs.add_belief(
+                                subject=member_id,
+                                predicate=f"is_on_my_team",
+                                confidence=1.0,
+                                evidence=[f"Revealed at game start via {key}"]
+                            )
+        
+        # Update beliefs based on role reveals
+        role_keys = ['hitler_id', 'spy_index', 'impostor_ids', 'merlin']
+        for key in role_keys:
+            if key in observation.data:
+                player_id = observation.data[key]
+                if isinstance(player_id, int) and player_id != self.player_id:
                     self.beliefs.add_belief(
                         subject=player_id,
-                        predicate="is_fascist",
+                        predicate=f"has_role_{key}",
                         confidence=1.0,
-                        evidence=["Revealed at game start"]
+                        evidence=[f"Revealed via {key}"]
                     )
-        
-        if 'hitler_id' in observation.data:
-            hitler_id = observation.data['hitler_id']
-            if hitler_id != self.player_id:
-                self.beliefs.add_belief(
-                    subject=hitler_id,
-                    predicate="is_hitler",
-                    confidence=1.0,
-                    evidence=["Revealed at game start"]
-                )
-        
-        # Track nominations
-        if 'nominee' in observation.data and 'president' in observation.data:
-            pres = observation.data['president']
-            nom = observation.data['nominee']
-            # Presidents who nominate the same people repeatedly might trust them
-            existing = self.beliefs.get_beliefs_about(pres)
-            if existing:
-                # Increment trust
-                self.beliefs.add_belief(
-                    subject=pres,
-                    predicate=f"trusts_player_{nom}",
-                    confidence=0.6,
-                    evidence=[f"Nominated player {nom}"]
-                )
-    
-    def _build_generic_action_prompt(self, observation: Observation) -> str:
-        """Build generic action prompt for non-Secret-Hitler games.
-        
-        Args:
-            observation: Current observation
-            
-        Returns:
-            Formatted prompt string
-        """
-        phase = observation.phase.name if hasattr(observation, 'phase') else "UNKNOWN"
-        
-        prompt_parts = [
-            f"=== GAME - {phase} ===",
-        ]
-        
-        # Add role/team info if available
-        if "role" in observation.data:
-            prompt_parts.append(f"Your Role: {observation.data['role'].upper()}")
-        if "team" in observation.data:
-            prompt_parts.append(f"Your Team: {observation.data['team'].upper()}")
-        if "role_info" in observation.data:
-            prompt_parts.append(f"\n{observation.data['role_info']}")
-        
-        # Add game state
-        game_info = []
-        for key in ["phase", "quest_number", "quests_succeeded", "quests_failed", "round_step", "sheriff", "gold"]:
-            if key in observation.data:
-                game_info.append(f"{key}: {observation.data[key]}")
-        if game_info:
-            prompt_parts.append(f"\nGame State: {', '.join(game_info)}")
-        
-        # Add recent memories
-        recent_memories = self.memory.get_recent(n=5)
-        if recent_memories:
-            prompt_parts.append("\n📝 Recent Events:")
-            for mem in recent_memories[-3:]:
-                prompt_parts.append(f"   - {mem.content}")
-        
-        # Add the instruction (most important!)
-        instruction = observation.data.get("instruction", "")
-        if instruction:
-            prompt_parts.append(f"\n⚡ ACTION REQUIRED:")
-            prompt_parts.append(f"{instruction}")
-        
-        # Add all observation data as JSON for full context
-        prompt_parts.append(f"\n📊 Full Observation:")
-        import json
-        # Filter out large/redundant fields
-        filtered_data = {k: v for k, v in observation.data.items() 
-                        if k not in ["instruction", "role_info"] and not k.startswith("_")}
-        prompt_parts.append(json.dumps(filtered_data, indent=2))
-        
-        prompt_parts.append("\n🎯 Provide your action in JSON format as specified in the instruction above.")
-        prompt_parts.append("Format: {\"type\": \"action_type\", ...other fields...}")
-        
-        return "\n".join(prompt_parts)
     
     def _build_action_prompt(self, observation: Observation) -> str:
-        """Build detailed prompt for action decision with memory and beliefs.
+        """Build action prompt from observation.
+        
+        This is a completely generic prompt builder that relies on the
+        game environment to provide clear instructions.
         
         Args:
             observation: Current observation
@@ -355,134 +271,76 @@ Respond in the following format:
         Returns:
             Formatted prompt string
         """
-        # Check if game provides explicit instruction (for generic games like Avalon, Sheriff, etc.)
-        if "instruction" in observation.data and observation.data["instruction"]:
-            return self._build_generic_action_prompt(observation)
-        
-        # Otherwise, use Secret Hitler-specific prompts
-        action_type = observation.data.get("action_required", "observe")
-        phase = observation.phase.name if hasattr(observation, 'phase') else "UNKNOWN"
+        phase = observation.phase if isinstance(observation.phase, str) else observation.phase.name
         
         prompt_parts = [
-            f"=== SECRET HITLER - {phase} ===",
-            f"\nYour Role: {observation.data.get('your_role', 'UNKNOWN')}",
-            f"Your Party: {observation.data.get('your_party', 'UNKNOWN')}",
+            f"=== GAME STATE - {phase.upper()} ===\n",
         ]
         
-        # Add known team info
-        if 'fascist_team' in observation.data:
-            team = observation.data['fascist_team']
-            prompt_parts.append(f"Your Fascist Team: {team}")
-        if 'hitler_id' in observation.data:
-            prompt_parts.append(f"Hitler is Player {observation.data['hitler_id']}")
+        # Add role/team info if available (common across games)
+        if "role" in observation.data:
+            role = observation.data["role"]
+            role_str = role.value if hasattr(role, 'value') else str(role)
+            prompt_parts.append(f"Your Role: {role_str.upper()}")
         
-        # Add game state
-        if 'liberal_policies' in observation.data:
-            prompt_parts.append(f"\nBoard: 🔵 {observation.data['liberal_policies']}/5 Liberal, 🔴 {observation.data['fascist_policies']}/6 Fascist")
+        if "team" in observation.data:
+            team = observation.data["team"]
+            team_str = team.value if hasattr(team, 'value') else str(team)
+            prompt_parts.append(f"Your Team: {team_str.upper()}")
         
         # Add recent memories
-        recent_memories = self.memory.get_recent(n=5)
+        recent_memories = self.memory.get_recent(n=15)
         if recent_memories:
             prompt_parts.append("\n📝 Recent Events:")
-            for mem in recent_memories[-3:]:  # Last 3 events
-                prompt_parts.append(f"   - {mem.content}")
+            for mem in recent_memories[-8:]:
+                prompt_parts.append(f"   • {mem.content}")
         
-        # Add beliefs about other players
-        high_conf_beliefs = self.beliefs.get_high_confidence_beliefs(threshold=0.7)
-        if high_conf_beliefs:
+        # Add high-confidence beliefs (increased to show more)
+        high_conf_beliefs = self.beliefs.get_high_confidence_beliefs(threshold=0.6)
+        if high_conf_beliefs and len(high_conf_beliefs) > 0:
             prompt_parts.append("\n🤔 Your Beliefs:")
-            for belief in high_conf_beliefs[:5]:  # Top 5 beliefs
-                prompt_parts.append(f"   - Player {belief.subject} {belief.predicate} ({belief.confidence:.0%} sure)")
+            # Show up to 10 beliefs for better strategic reasoning
+            for belief in high_conf_beliefs[:10]:
+                prompt_parts.append(
+                    f"   • Player {belief.subject}: {belief.predicate} "
+                    f"({belief.confidence:.0%} confident)"
+                )
         
-        # Add phase-specific information
-        if action_type == "nominate_chancellor":
-            legal = observation.data.get("legal_candidates", [])
-            prompt_parts.append(f"\n📋 You are PRESIDENT. Nominate a Chancellor from: {legal}")
-            prompt_parts.append("\n💡 Think about:")
-            prompt_parts.append("   - Who can you trust?")
-            prompt_parts.append("   - Who might be Fascist/Hitler?")
-            prompt_parts.append("\nRespond with ONLY the player number you nominate (e.g., '2')")
-            
-        elif action_type == "vote":
-            president = observation.data.get('president', '?')
-            nominee = observation.data.get('nominee', '?')
-            prompt_parts.append(f"\n🗳️  VOTE: President {president} nominated Player {nominee} for Chancellor")
-            prompt_parts.append("\n💡 Consider:")
-            prompt_parts.append("   - Do you trust this government?")
-            prompt_parts.append("   - What policies might they enact?")
-            prompt_parts.append("\nRespond with ONLY 'Ja' (yes) or 'Nein' (no)")
-            
-        elif action_type == "discard_policy":
-            policies = observation.data.get('policies', [])
-            prompt_parts.append(f"\n📜 You drew policies: {policies}")
-            prompt_parts.append("\n💡 As President, discard ONE policy:")
-            prompt_parts.append("\nRespond with ONLY '0', '1', or '2' for the policy index to discard")
-            
-        elif action_type == "enact_policy":
-            policies = observation.data.get('policies', [])
-            prompt_parts.append(f"\n📜 Chancellor choice: {policies}")
-            prompt_parts.append("\n💡 Which policy do you enact?")
-            prompt_parts.append("\nRespond with ONLY '0' or '1' for the policy index to enact")
+        # Add the instruction (MOST IMPORTANT - from game environment)
+        instruction = observation.data.get("instruction", "")
+        if instruction:
+            prompt_parts.append(f"\n⚡ INSTRUCTION:")
+            prompt_parts.append(f"{instruction}")
         
-        elif action_type == "discuss_nomination":
-            president = observation.data.get('president', '?')
-            nominee = observation.data.get('chancellor_nominee', '?')
-            previous = observation.data.get('previous_statements', [])
-            
-            prompt_parts.append(f"\n💬 PUBLIC DISCUSSION PHASE")
-            prompt_parts.append(f"President {president} has nominated Player {nominee} for Chancellor.")
-            prompt_parts.append(f"\n⚠️  IMPORTANT: This is PUBLIC - ALL PLAYERS will see your statement!")
-            
-            if previous:
-                prompt_parts.append(f"\nPrevious statements in this discussion:")
-                for stmt in previous:
-                    prompt_parts.append(f"   Player {stmt['speaker']}: \"{stmt['statement']}\"")
-            
-            prompt_parts.append("\n💡 You can:")
-            prompt_parts.append("   - Express your opinion about the nomination")
-            prompt_parts.append("   - Share information (or misinformation)")
-            prompt_parts.append("   - Stay silent (respond with empty string)")
-            prompt_parts.append("\n🎭 Remember: Use deception strategically if you're Fascist/Hitler")
-            prompt_parts.append("\nRespond with your PUBLIC statement, or empty string to stay silent")
+        # Add relevant observation data (filtered)
+        relevant_keys = [
+            'alive_players', 'n_alive', 'current_debate', 'discussion',
+            'qa_history', 'tasks_completed', 'quest_number', 'proposals_rejected',
+            'round', 'turn', 'max_turns', 'phase_info', 'available_actions'
+        ]
         
-        elif action_type == "discuss_veto":
-            president = observation.data.get('president', '?')
-            chancellor = observation.data.get('chancellor', '?')
-            previous = observation.data.get('previous_statements', [])
-            
-            prompt_parts.append(f"\n🚨 VETO DISCUSSION PHASE (PUBLIC)")
-            prompt_parts.append(f"Chancellor {chancellor} has proposed a VETO!")
-            prompt_parts.append(f"President {president} must decide whether to accept.")
-            prompt_parts.append(f"\n⚠️  IMPORTANT: This is PUBLIC - ALL PLAYERS will see your statement!")
-            
-            if previous:
-                prompt_parts.append(f"\nPrevious statements in this veto discussion:")
-                for stmt in previous:
-                    prompt_parts.append(f"   Player {stmt['speaker']}: \"{stmt['statement']}\"")
-            
-            prompt_parts.append("\n💡 You can:")
-            prompt_parts.append("   - Argue for/against accepting the veto")
-            prompt_parts.append("   - Share your reasoning (or mislead)")
-            prompt_parts.append("   - Stay silent (respond with empty string)")
-            prompt_parts.append("\n🎭 Remember: This is a strategic moment - use it wisely!")
-            prompt_parts.append("\nRespond with your PUBLIC statement, or empty string to stay silent")
+        relevant_data = {}
+        for key in relevant_keys:
+            if key in observation.data:
+                relevant_data[key] = observation.data[key]
         
-        elif action_type == "veto_response":
-            chancellor = observation.data.get('chancellor', '?')
-            prompt_parts.append(f"\n🚫 VETO RESPONSE")
-            prompt_parts.append(f"Chancellor {chancellor} has proposed a veto.")
-            prompt_parts.append("\n💡 As President, do you accept the veto?")
-            prompt_parts.append("   - Accept: Both policies discarded, election tracker increases")
-            prompt_parts.append("   - Reject: Chancellor must enact one of the two policies")
-            prompt_parts.append("\nRespond with 'accept' or 'reject'")
+        if relevant_data:
+            prompt_parts.append(f"\n📊 Game Info:")
+            prompt_parts.append(json.dumps(relevant_data, indent=2, default=str))
         
-        else:
-            prompt_parts.append(f"\n⏸️  Observing the game...")
+        # Final reminder about JSON format
+        prompt_parts.append("\n🎯 RESPOND WITH VALID JSON:")
+        prompt_parts.append("   1. Think through your strategy")
+        prompt_parts.append("   2. Provide the JSON action exactly as specified above")
+        prompt_parts.append("   3. Example: {\"type\": \"action_name\", \"parameter\": value}")
         
         return "\n".join(prompt_parts)
     
     def _parse_action_from_llm(self, llm_response: str, observation: Observation) -> Action:
-        """Parse action from LLM response (handles both JSON and Secret Hitler format).
+        """Parse action from LLM response.
+        
+        This parser expects JSON format and extracts it from the LLM response.
+        The game environment is responsible for specifying the exact format needed.
         
         Args:
             llm_response: Response from LLM
@@ -491,17 +349,11 @@ Respond in the following format:
         Returns:
             Parsed action
         """
-        import json
-        import re
-        
-        # First try to extract and parse JSON (for generic games like Avalon, Sheriff)
-        # Look for JSON objects in the response (handles nested structures)
-        # Try to find a complete JSON object with "type" field
-        if '{' in llm_response and '"type"' in llm_response:
-            # Find the start of JSON
+        # Try to extract and parse JSON from response
+        if '{' in llm_response and '}' in llm_response:
+            # Find the JSON object (handles nested braces)
             start = llm_response.find('{')
             if start >= 0:
-                # Try to parse from this position
                 brace_count = 0
                 for i in range(start, len(llm_response)):
                     if llm_response[i] == '{':
@@ -513,325 +365,96 @@ Respond in the following format:
                             json_str = llm_response[start:i+1]
                             try:
                                 action_data = json.loads(json_str)
-                                if "type" in action_data:
-                                    print(f"[DEBUG] Parsed JSON action: {action_data}")  # DEBUG
-                                    return Action(
-                                        player_id=self.player_id,
-                                        action_type=ActionType.SPEAK,  # Generic type
-                                        data=action_data
-                                    )
-                            except json.JSONDecodeError as e:
-                                print(f"[DEBUG] JSON parse failed: {e}, json_str: {json_str[:100]}")  # DEBUG
-                                pass
+                                
+                                # Validate that we have a type field
+                                if "type" not in action_data:
+                                    raise ValueError("JSON missing 'type' field")
+                                
+                                return Action(
+                                    player_id=self.player_id,
+                                    action_type=ActionType.SPEAK,  # Generic type
+                                    data=action_data
+                                )
+                            except (json.JSONDecodeError, ValueError) as e:
+                                # Try to continue searching for another JSON object
+                                continue
                             break
         
-        # Fall back to Secret Hitler-specific parsing
-        action_type = observation.data.get("action_required", "speak")
-        response = llm_response.strip().lower()
+        # If we couldn't parse JSON, try to extract a simple response
+        # This is a fallback for edge cases
+        response_clean = llm_response.strip()
         
-        # Extract just the answer if there's reasoning
-        if '\n' in response:
-            # Take last line as the answer
-            response = response.split('\n')[-1].strip()
+        # Remove common markdown/formatting
+        response_clean = re.sub(r'```json\s*', '', response_clean)
+        response_clean = re.sub(r'```\s*', '', response_clean)
+        response_clean = response_clean.strip()
         
-        if action_type == "discuss_nomination" or action_type == "discuss_veto":
-            # Extract statement from response
-            statement = llm_response.strip()
-            
-            # Try to extract just the action/statement part (skip reasoning if present)
-            # Look for common markers like [Action]:, [Statement]:, or after reasoning
-            statement_lower = statement.lower()
-            
-            if "[action]:" in statement_lower:
-                # Split case-insensitively
-                idx = statement_lower.find("[action]:")
-                statement = statement[idx + len("[action]:"):].strip()
-            elif "[statement]:" in statement_lower:
-                idx = statement_lower.find("[statement]:")
-                statement = statement[idx + len("[statement]:"):].strip()
-            elif "[reasoning]:" in statement_lower and "\n\n" in statement:
-                # If there's reasoning followed by blank line, take everything after
-                parts = statement.split("\n\n", 1)
-                if len(parts) > 1:
-                    statement = parts[1].strip()
-            
-            # Remove quotes if present
-            statement = statement.strip('"\'')
-            
-            return Action(
-                player_id=self.player_id,
-                action_type=ActionType.SPEAK,
-                data={"statement": statement}
-            )
+        # Try parsing again after cleanup
+        if response_clean.startswith('{') and response_clean.endswith('}'):
+            try:
+                action_data = json.loads(response_clean)
+                if "type" in action_data:
+                    return Action(
+                        player_id=self.player_id,
+                        action_type=ActionType.SPEAK,
+                        data=action_data
+                    )
+            except json.JSONDecodeError:
+                pass
         
-        elif action_type == "veto_response":
-            # Check for accept/reject
-            if "accept" in response:
-                return Action(
-                    player_id=self.player_id,
-                    action_type=ActionType.VOTE,
-                    data={"accept_veto": True}
-                )
-            else:
-                return Action(
-                    player_id=self.player_id,
-                    action_type=ActionType.VOTE,
-                    data={"accept_veto": False}
-                )
-        
-        elif action_type == "nominate_chancellor":
-            # Extract number from response
-            legal = observation.data.get("legal_candidates", [])
-            for word in response.split():
-                if word.isdigit():
-                    nominee = int(word)
-                    if nominee in legal:
-                        return Action(
-                            player_id=self.player_id,
-                            action_type=ActionType.NOMINATE,
-                            target=nominee,
-                            data={}
-                        )
-            # Fallback: pick first legal
-            return Action(
-                player_id=self.player_id,
-                action_type=ActionType.NOMINATE,
-                target=legal[0] if legal else 0,
-                data={}
-            )
-            
-        elif action_type == "vote":
-            # Parse Ja/Nein
-            vote = "ja" in response or "yes" in response
-            return Action(
-                player_id=self.player_id,
-                action_type=ActionType.VOTE,
-                data={"vote": vote}
-            )
-            
-        elif action_type in ["discard_policy", "enact_policy"]:
-            # Extract index
-            for char in response:
-                if char.isdigit():
-                    idx = int(char)
-                    if idx in [0, 1, 2]:
-                        return Action(
-                            player_id=self.player_id,
-                            action_type=ActionType.POLICY_ACTION,
-                            data={"index": idx}
-                        )
-            # Fallback
-            return Action(
-                player_id=self.player_id,
-                action_type=ActionType.POLICY_ACTION,
-                data={"index": 0}
-            )
-        
-        # Default
+        # Last resort: create a wait action with the raw response
+        print(f"⚠️  Could not parse valid JSON from LLM response. Using wait action.")
         return Action(
             player_id=self.player_id,
             action_type=ActionType.SPEAK,
-            data={"message": "..."}
+            data={
+                "type": "wait",
+                "raw_response": llm_response[:200]
+            }
         )
     
-    
-    def notify(self, event_type: str, data: Dict[str, Any]) -> None:
-        """Process game events and update beliefs.
+    def observe(self, observation: Observation) -> None:
+        """Process observation without taking action.
         
         Args:
-            event_type: Type of event
-            data: Event data
+            observation: Observation to process
         """
-        # Create readable memory entry
-        memory_text = self._format_event_for_memory(event_type, data)
-        
-        # Store event in memory
+        # Store in memory
+        event_summary = self._summarize_observation(observation)
         self.memory.add(
-            content=memory_text,
-            importance=self._get_event_importance(event_type),
-            source=event_type
+            content=event_summary,
+            importance=0.5  # Observations are less important than actions
         )
         
-        # Update beliefs based on events
-        self._update_beliefs_from_event(event_type, data)
-    
-    def _format_event_for_memory(self, event_type: str, data: Dict[str, Any]) -> str:
-        """Format event for memory storage.
-        
-        Args:
-            event_type: Type of event
-            data: Event data
-            
-        Returns:
-            Formatted string
-        """
-        if event_type == "game_start":
-            role = data.get("role", "UNKNOWN")
-            return f"Game started. I am {role}."
-        elif event_type == "player_eliminated":
-            player_id = data.get("player_id", "?")
-            was_hitler = data.get("was_hitler", False)
-            if was_hitler:
-                return f"Player {player_id} was executed and revealed as HITLER!"
-            return f"Player {player_id} was eliminated."
-        elif event_type == "policy_enacted":
-            policy = data.get("policy", "?")
-            return f"{policy} policy enacted."
-        elif event_type == "investigation_result":
-            target = data.get("target", "?")
-            party = data.get("party", "?")
-            return f"Investigated Player {target}: they are {party}."
-        elif event_type == "player_executed":
-            player_id = data.get("player_id", "?")
-            return f"Player {player_id} was executed."
-        elif event_type == "discussion_statement":
-            speaker = data.get("speaker", "?")
-            statement = data.get("statement", "")
-            context = data.get("context", "discussion")
-            
-            if context == "nomination_discussion":
-                pres = data.get("president", "?")
-                nominee = data.get("chancellor_nominee", "?")
-                return f"[DISCUSSION] Player {speaker} said: \"{statement}\" (about President {pres} nominating Player {nominee})"
-            elif context == "veto_discussion":
-                pres = data.get("president", "?")
-                chanc = data.get("chancellor", "?")
-                return f"[VETO DISCUSSION] Player {speaker} said: \"{statement}\" (Chancellor {chanc} proposed veto to President {pres})"
-            else:
-                return f"[DISCUSSION] Player {speaker} said: \"{statement}\""
-        else:
-            return f"{event_type}: {str(data)[:100]}"
-    
-    def _get_event_importance(self, event_type: str) -> float:
-        """Determine importance of event for memory.
-        
-        Args:
-            event_type: Type of event
-            
-        Returns:
-            Importance score (0-1)
-        """
-        importance_map = {
-            "game_start": 1.0,
-            "player_eliminated": 0.9,
-            "investigation_result": 0.9,
-            "policy_enacted": 0.7,
-            "player_executed": 0.9,
-            "discussion_statement": 0.8,  # PUBLIC discussions are important
-            "election_result": 0.6,
-        }
-        return importance_map.get(event_type, 0.5)
-    
-    def _update_beliefs_from_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        """Update beliefs based on game events.
-        
-        Args:
-            event_type: Type of event
-            data: Event data
-        """
-        if event_type == "player_eliminated":
-            eliminated_id = data.get("player_id")
-            if eliminated_id is not None:
-                self.beliefs.add_belief(
-                    subject=eliminated_id,
-                    predicate="is_eliminated",
-                    confidence=1.0,
-                    evidence=["Player was eliminated"]
-                )
-                
-                # If Hitler was eliminated, update belief
-                if data.get("was_hitler", False):
-                    self.beliefs.add_belief(
-                        subject=eliminated_id,
-                        predicate="was_hitler",
-                        confidence=1.0,
-                        evidence=["Revealed when executed"]
-                    )
-        
-        elif event_type == "investigation_result":
-            # This is private info only the investigator gets
-            target = data.get("target")
-            party = data.get("party")
-            if target is not None and party:
-                predicate = "is_fascist" if party == "FASCIST" else "is_liberal"
-                self.beliefs.add_belief(
-                    subject=target,
-                    predicate=predicate,
-                    confidence=1.0,
-                    evidence=["Investigated by President"]
-                )
-        
-        elif event_type == "policy_enacted":
-            # Track who was in government when policies were enacted
-            pres = data.get("president")
-            chanc = data.get("chancellor")
-            policy = data.get("policy")
-            
-            if pres is not None and chanc is not None and policy:
-                # If Fascist policy, slightly increase suspicion
-                if policy == "FASCIST":
-                    for player_id in [pres, chanc]:
-                        if player_id != self.player_id:
-                            existing = self.beliefs.get_belief(player_id, "might_be_fascist")
-                            current_conf = existing.confidence if existing else 0.3
-                            self.beliefs.add_belief(
-                                subject=player_id,
-                                predicate="might_be_fascist",
-                                confidence=min(current_conf + 0.15, 0.9),
-                                evidence=[f"Enacted {policy} policy"]
-                            )
-        
-        elif event_type == "discussion_statement":
-            # Track who speaks and what they say during public discussions
-            speaker = data.get("speaker")
-            statement = data.get("statement", "").lower()
-            
-            if speaker is not None and speaker != self.player_id:
-                # Basic belief updates based on discussion content
-                # This is intentionally simple - more sophisticated analysis could be added
-                
-                # Track that this player participated in discussion
-                self.beliefs.add_belief(
-                    subject=speaker,
-                    predicate="participates_in_discussion",
-                    confidence=0.9,
-                    evidence=["Made public statement"]
-                )
-                
-                # If statement contains keywords, update beliefs accordingly
-                # Note: In a real game, agents should analyze statements more carefully
-                if any(word in statement for word in ["trust", "support", "agree"]):
-                    self.beliefs.add_belief(
-                        subject=speaker,
-                        predicate="expresses_trust",
-                        confidence=0.6,
-                        evidence=[f"Said: {statement[:50]}"]
-                    )
-                elif any(word in statement for word in ["suspicious", "don't trust", "disagree", "concerned"]):
-                    self.beliefs.add_belief(
-                        subject=speaker,
-                        predicate="expresses_suspicion",
-                        confidence=0.6,
-                        evidence=[f"Said: {statement[:50]}"]
-                    )
+        # Update beliefs
+        self._update_beliefs_from_observation(observation)
     
     def reset(self) -> None:
-        """Reset agent for new game."""
+        """Reset agent state for a new game."""
         super().reset()
         self.memory.clear()
         self.beliefs.clear()
+        
+        # Reset conversation history but keep system prompt
         self.conversation_history = [
             {"role": "system", "content": self.system_prompt}
         ]
-        self.llm_client.reset_stats()
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Get agent statistics."""
-        stats = super().get_stats()
-        stats.update({
-            "llm_stats": self.llm_client.get_stats(),
-            "memory_size": self.memory.size(),
-            "beliefs_count": len(self.beliefs.beliefs),
-        })
-        return stats
-
+    def get_memory_summary(self) -> Dict[str, Any]:
+        """Get summary of agent's memory and beliefs.
+        
+        Returns:
+            Dictionary with memory and belief information
+        """
+        return {
+            "memory_size": len(self.memory.memories),
+            "recent_memories": [m.content for m in self.memory.get_recent(n=5)],
+            "high_confidence_beliefs": [
+                {
+                    "subject": b.subject,
+                    "predicate": b.predicate,
+                    "confidence": b.confidence
+                }
+                for b in self.beliefs.get_high_confidence_beliefs(threshold=0.7)
+            ]
+        }

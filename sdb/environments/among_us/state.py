@@ -1,7 +1,7 @@
 """Game state for Among Us."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from sdb.core.base_state import BaseState
 from sdb.environments.among_us.types import (
@@ -11,6 +11,9 @@ from sdb.environments.among_us.types import (
     PlayerState,
     TaskRoundResult,
 )
+
+if TYPE_CHECKING:
+    from sdb.environments.among_us.map import SpaceshipMap
 
 
 @dataclass
@@ -28,6 +31,7 @@ class AmongUsState(BaseState):
         current_votes: Votes in current voting phase
         winner: Winning team ("crewmates" or "impostors")
         win_reason: Reason for game end
+        ship_map: Reference to the spatial map (not serialized)
     """
     players: Dict[int, PlayerState] = field(default_factory=dict)
     phase: Phase = Phase.TASK
@@ -47,6 +51,9 @@ class AmongUsState(BaseState):
     # Game outcome
     winner: Optional[str] = None
     win_reason: str = ""
+    
+    # Spatial (not serialized, managed by environment)
+    ship_map: Optional['SpaceshipMap'] = field(default=None, repr=False, compare=False)
     
     def get_alive_players(self) -> List[int]:
         """Return list of alive player IDs."""
@@ -86,4 +93,69 @@ class AmongUsState(BaseState):
         for pid in list(self.impostor_kill_cooldowns.keys()):
             if self.impostor_kill_cooldowns[pid] > 0:
                 self.impostor_kill_cooldowns[pid] -= 1
+    
+    # Spatial methods
+    def get_players_in_room(self, room_name: str, alive_only: bool = True) -> List[int]:
+        """Get all players in a specific room.
+        
+        Args:
+            room_name: Name of the room
+            alive_only: Only return alive players
+            
+        Returns:
+            List of player IDs in the room
+        """
+        players_in_room = []
+        for pid, player in self.players.items():
+            if player.location == room_name:
+                if not alive_only or player.is_alive:
+                    players_in_room.append(pid)
+        return players_in_room
+    
+    def get_visible_players(self, observer_pid: int) -> List[int]:
+        """Get players visible to an observer (same room, alive).
+        
+        Args:
+            observer_pid: Observer player ID
+            
+        Returns:
+            List of visible player IDs
+        """
+        observer = self.players.get(observer_pid)
+        if not observer or not observer.is_alive:
+            return []
+        
+        # Can see alive players in same room (except self)
+        visible = []
+        for pid, player in self.players.items():
+            if pid != observer_pid and player.is_alive and player.location == observer.location:
+                visible.append(pid)
+        return visible
+    
+    def can_player_move_to(self, player_id: int, target_room: str) -> bool:
+        """Check if a player can move to a target room.
+        
+        Args:
+            player_id: ID of the player
+            target_room: Target room name
+            
+        Returns:
+            True if movement is legal
+        """
+        player = self.players.get(player_id)
+        if not player or not player.is_alive or not self.ship_map:
+            return False
+        
+        current_room = player.location
+        
+        # Can always move via corridor
+        if self.ship_map.can_move_via_corridor(current_room, target_room):
+            return True
+        
+        # Impostors can also move via vents
+        if player.role == PlayerRole.IMPOSTOR:
+            if self.ship_map.can_move_via_vent(current_room, target_room):
+                return True
+        
+        return False
 

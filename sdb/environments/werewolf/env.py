@@ -594,6 +594,58 @@ class WerewolfEnv(BaseEnvironment):
         
         return False
     
+    def _format_player_observations(self, player_id: int) -> str:
+        """Format all private observations for a player.
+        
+        Args:
+            player_id: ID of the player
+            
+        Returns:
+            Formatted string of all observations
+        """
+        player = self.state.players[player_id]
+        if not player.observations:
+            return "None yet."
+        
+        formatted = []
+        for i, obs in enumerate(player.observations, 1):
+            formatted.append(f"   {i}. {obs}")
+        return "\n".join(formatted)
+    
+    def _format_debate_history(self) -> str:
+        """Format the complete debate history for the current day.
+        
+        Returns:
+            Formatted string of debate statements
+        """
+        if not self.state.current_day.debate:
+            return "   (Debate has not started)"
+        
+        formatted = []
+        for speaker_id, statement in self.state.current_day.debate:
+            speaker_name = self.state.players[speaker_id].name
+            formatted.append(f"   • {speaker_name}: \"{statement}\"")
+        return "\n".join(formatted)
+    
+    def _format_previous_rounds_summary(self) -> str:
+        """Format summary of previous rounds (who was eliminated).
+        
+        Returns:
+            Formatted string of round results
+        """
+        if not self.state.day_results:
+            return "   (First round)"
+        
+        formatted = []
+        for day_result in self.state.day_results:
+            if day_result.eliminated is not None:
+                elim_name = self.state.players[day_result.eliminated].name
+                elim_role = self.state.players[day_result.eliminated].role.value
+                formatted.append(f"   • Round {day_result.round_num}: {elim_name} ({elim_role}) was eliminated")
+            else:
+                formatted.append(f"   • Round {day_result.round_num}: No elimination")
+        return "\n".join(formatted) if formatted else "   (First round)"
+    
     def _get_observations(self) -> Dict[int, Observation]:
         """Generate observations for all players."""
         observations = {}
@@ -620,10 +672,24 @@ class WerewolfEnv(BaseEnvironment):
             
             elif self.state.phase == Phase.NIGHT_WEREWOLF:
                 if player.role == Role.WEREWOLF:
-                    instruction = (
-                        "NIGHT PHASE: As a Werewolf, choose a player to eliminate. "
-                        "Respond with JSON: {\"type\": \"eliminate\", \"target\": <player_id>}"
-                    )
+                    werewolf_ids = self.state.get_alive_werewolves()
+                    teammates = [self.state.players[wid].name for wid in werewolf_ids if wid != pid]
+                    teammates_str = ", ".join(teammates) if teammates else "none (you are alone)"
+                    
+                    instruction = f"""=== NIGHT {self.state.round_number} - WEREWOLF ACTION ===
+
+YOUR ROLE: Werewolf (Evil Team)
+YOUR TEAMMATES: {teammates_str}
+
+🔍 PREVIOUS ELIMINATIONS:
+{self._format_previous_rounds_summary()}
+
+⚡ ACTION REQUIRED:
+Choose a player to eliminate tonight.
+
+Available targets: {[self.state.players[p].name for p in alive if p not in werewolf_ids]}
+
+Respond with JSON: {{"type": "eliminate", "target": <player_id>}}"""
                     obs_type = "act"
                 else:
                     instruction = "NIGHT PHASE: You are asleep."
@@ -631,10 +697,21 @@ class WerewolfEnv(BaseEnvironment):
             
             elif self.state.phase == Phase.NIGHT_DOCTOR:
                 if player.role == Role.DOCTOR:
-                    instruction = (
-                        "NIGHT PHASE: As the Doctor, choose a player to protect. "
-                        "Respond with JSON: {\"type\": \"protect\", \"target\": <player_id>}"
-                    )
+                    instruction = f"""=== NIGHT {self.state.round_number} - DOCTOR ACTION ===
+
+YOUR ROLE: Doctor (Good Team)
+
+🔍 PREVIOUS ELIMINATIONS:
+{self._format_previous_rounds_summary()}
+
+⚡ ACTION REQUIRED:
+Choose a player to protect from Werewolf elimination tonight.
+
+Available targets: {[self.state.players[p].name for p in alive]}
+
+Strategy: Protect suspected power roles (Seer) or vulnerable villagers.
+
+Respond with JSON: {{"type": "protect", "target": <player_id>}}"""
                     obs_type = "act"
                 else:
                     instruction = "NIGHT PHASE: You are asleep."
@@ -642,10 +719,24 @@ class WerewolfEnv(BaseEnvironment):
             
             elif self.state.phase == Phase.NIGHT_SEER:
                 if player.role == Role.SEER:
-                    instruction = (
-                        "NIGHT PHASE: As the Seer, choose a player to investigate. "
-                        "Respond with JSON: {\"type\": \"investigate\", \"target\": <player_id>}"
-                    )
+                    instruction = f"""=== NIGHT {self.state.round_number} - SEER ACTION ===
+
+YOUR ROLE: Seer (Good Team) - You can investigate players to learn their role!
+
+🔮 YOUR PRIVATE OBSERVATIONS (Keep secret!):
+{self._format_player_observations(pid)}
+
+🔍 PREVIOUS ELIMINATIONS:
+{self._format_previous_rounds_summary()}
+
+⚡ ACTION REQUIRED:
+Choose a player to investigate and learn if they are Werewolf or not.
+
+Available targets: {[self.state.players[p].name for p in alive if p != pid]}
+
+Strategy: Investigate suspicious players or confirm trusted allies.
+
+Respond with JSON: {{"type": "investigate", "target": <player_id>}}"""
                     obs_type = "act"
                 else:
                     instruction = "NIGHT PHASE: You are asleep."
@@ -658,10 +749,30 @@ class WerewolfEnv(BaseEnvironment):
                     instruction = "Waiting for others to bid."
                     obs_type = "observe"
                 else:
-                    instruction = (
-                        "DAY PHASE - BIDDING: Bid to speak (0-4). Higher bids speak first. "
-                        "Respond with JSON: {\"type\": \"bid\", \"bid\": <0-4>}"
-                    )
+                    turns_left = self.config.max_debate_turns - len(self.state.current_day.debate)
+                    instruction = f"""=== DAY {self.state.round_number} - BIDDING TO SPEAK ===
+
+YOUR ROLE: {player.role.value} ({player.team.value} Team)
+
+🔍 PREVIOUS ELIMINATIONS:
+{self._format_previous_rounds_summary()}
+
+💬 DEBATE SO FAR THIS ROUND:
+{self._format_debate_history()}
+
+⚡ ACTION REQUIRED:
+Bid 0-4 to speak next. Higher bids speak first. {turns_left} debate turns remaining.
+
+BID OPTIONS:
+  0: Observe and listen for now
+  1: General thoughts to share
+  2: Something critical to contribute
+  3: Absolutely urgent to speak
+  4: Must respond directly to someone
+
+Strategy: {"Consider revealing your Seer information or defending yourself!" if player.role == Role.SEER and player.observations else "Listen carefully and identify suspicious behavior."}
+
+Respond with JSON: {{"type": "bid", "bid": <0-4>}}"""
                     obs_type = "act"
                     obs_data["current_debate"] = [
                         f"{self.state.players[speaker].name}: {stmt}"
@@ -670,10 +781,28 @@ class WerewolfEnv(BaseEnvironment):
             
             elif self.state.phase == Phase.DAY_DEBATE:
                 if pid == self.state.current_speaker:
-                    instruction = (
-                        "DAY PHASE - DEBATE: You won the bid! Make a statement. "
-                        "Respond with JSON: {\"type\": \"debate\", \"statement\": \"<your statement>\"}"
-                    )
+                    role_strategy = ""
+                    if player.role == Role.WEREWOLF:
+                        role_strategy = "\n🐺 WEREWOLF STRATEGY: Sow chaos, cast suspicion on Villagers, deflect from yourself and teammates. Deception is your weapon!"
+                    elif player.role == Role.SEER and player.observations:
+                        role_strategy = f"\n🔮 SEER STRATEGY: You have private information! Consider revealing it strategically, but beware - revealing makes you a Werewolf target!"
+                    elif player.role in [Role.DOCTOR, Role.VILLAGER]:
+                        role_strategy = "\n👥 VILLAGER STRATEGY: Scrutinize accusations, expose inconsistencies, call out suspicious behavior. Work together to find Werewolves!"
+                    
+                    instruction = f"""=== DAY {self.state.round_number} - YOUR TURN TO SPEAK ===
+
+YOUR ROLE: {player.role.value} ({player.team.value} Team){role_strategy}
+
+🔍 PREVIOUS ELIMINATIONS:
+{self._format_previous_rounds_summary()}
+
+💬 DEBATE SO FAR THIS ROUND:
+{self._format_debate_history()}
+
+⚡ ACTION REQUIRED:
+You won the bid! Make a public statement. Be strategic and persuasive!
+
+Respond with JSON: {{"type": "debate", "statement": "<your statement>"}}"""
                     obs_type = "act"
                 else:
                     instruction = f"Waiting for {self.state.players[self.state.current_speaker].name} to speak."
@@ -685,10 +814,31 @@ class WerewolfEnv(BaseEnvironment):
                 ]
             
             elif self.state.phase == Phase.DAY_VOTING:
-                instruction = (
-                    "DAY PHASE - VOTING: Vote to eliminate a player. "
-                    "Respond with JSON: {\"type\": \"vote\", \"target\": <player_id>}"
-                )
+                role_strategy = ""
+                if player.role == Role.WEREWOLF:
+                    werewolf_ids = self.state.get_alive_werewolves()
+                    role_strategy = "\n🐺 WEREWOLF STRATEGY: Target influential Villagers. If Villagers suspect one of their own, join the vote against them!"
+                elif player.role == Role.SEER and player.observations:
+                    role_strategy = "\n🔮 SEER STRATEGY: Vote based on your investigations! Look for Werewolves or inconsistencies."
+                else:
+                    role_strategy = "\n👥 VILLAGER STRATEGY: Look for inconsistencies, deflection, discord-sowing, or unusually quiet players."
+                
+                instruction = f"""=== DAY {self.state.round_number} - VOTING ===
+
+YOUR ROLE: {player.role.value} ({player.team.value} Team){role_strategy}
+
+🔍 PREVIOUS ELIMINATIONS:
+{self._format_previous_rounds_summary()}
+
+💬 COMPLETE DEBATE THIS ROUND:
+{self._format_debate_history()}
+
+⚡ ACTION REQUIRED:
+Vote to eliminate a player. Your vote is PRIVATE.
+
+Available targets: {[self.state.players[p].name for p in alive if p != pid]}
+
+Respond with JSON: {{"type": "vote", "target": <player_id>}}"""
                 obs_type = "act"
                 obs_data["current_debate"] = [
                     f"{self.state.players[speaker].name}: {stmt}"

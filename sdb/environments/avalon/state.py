@@ -6,7 +6,7 @@ import random
 
 from .config import AvalonConfig
 from .types import (
-    Role, Team, Phase, PlayerState, QuestResult, TeamProposal,
+    Role, Team, Phase, PlayerState, QuestResult, TeamProposal, DiscussionStatement,
     QUEST_SIZES, TEAM_COMPOSITION, QUEST_FAILS_NEEDED,
 )
 
@@ -52,6 +52,11 @@ class AvalonState:
     current_proposal: Optional[TeamProposal] = None
     proposal_history: List[TeamProposal] = field(default_factory=list)
     team_rejections: int = 0
+    
+    # Discussion tracking
+    current_discussion: List[DiscussionStatement] = field(default_factory=list)
+    discussion_order: List[int] = field(default_factory=list)  # Order players speak in
+    next_speaker_index: int = 0  # Index in discussion_order for next speaker
     
     # Score tracking
     quests_succeeded: int = 0

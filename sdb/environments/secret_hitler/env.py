@@ -13,6 +13,7 @@ from sdb.environments.secret_hitler.types import (
     PlayerInfo, Role, Party, Policy, Phase, Vote, Government, PresidentialPower
 )
 from sdb.environments.secret_hitler.rules import PolicyDeck, GameRules
+from sdb.environments.secret_hitler import prompts
 from sdb.logging import GameLogger
 
 
@@ -188,6 +189,8 @@ class SecretHitlerEnv(BaseEnvironment):
             obs = self.state.get_observation(self.state.president_idx)
             obs.data["legal_candidates"] = legal_candidates
             obs.data["action_required"] = "nominate_chancellor"
+            # Add full context instruction
+            obs.data["instruction"] = prompts.get_nomination_instruction(legal_candidates, obs.data)
             
             try:
                 action = president.act(obs)

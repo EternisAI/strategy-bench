@@ -52,6 +52,36 @@ class SecretHitlerState(BaseState):
     president_hand: List[Policy] = field(default_factory=list)
     chancellor_hand: List[Policy] = field(default_factory=list)
     
+    def get_formatted_game_history(self) -> str:
+        """Format complete game history for display.
+        
+        Returns:
+            Formatted string of all game events
+        """
+        if not self.game_history:
+            return "   (Game just started)"
+        
+        formatted = []
+        for i, event in enumerate(self.game_history, 1):
+            formatted.append(f"   {i}. {event}")
+        return "\n".join(formatted)
+    
+    def get_formatted_discussion(self) -> str:
+        """Format current discussion for display.
+        
+        Returns:
+            Formatted string of discussion statements
+        """
+        if not self.current_discussion:
+            return "   (No discussion yet)"
+        
+        formatted = []
+        for entry in self.current_discussion:
+            speaker = entry.get("speaker", "?")
+            statement = entry.get("statement", "")
+            formatted.append(f"   • Player {speaker}: \"{statement}\"")
+        return "\n".join(formatted)
+    
     def get_observation(self, player_id: PlayerID) -> Observation:
         """Get observation for a specific player.
         
@@ -64,6 +94,7 @@ class SecretHitlerState(BaseState):
         # Public information
         public_data = {
             "phase": self.phase.name,
+            "round": self.round_number,
             "liberal_policies": self.liberal_policies,
             "fascist_policies": self.fascist_policies,
             "election_tracker": self.election_tracker,
@@ -73,8 +104,10 @@ class SecretHitlerState(BaseState):
             "last_government": self.last_government,
             "alive_players": self.alive_players,
             "confirmed_not_hitler": list(self.confirmed_not_hitler),
-            "game_history": self.game_history[-5:],  # Last 5 events
+            "game_history": self.game_history,  # Full history now!
+            "formatted_history": self.get_formatted_game_history(),  # Formatted for easy reading
             "current_discussion": self.current_discussion,
+            "formatted_discussion": self.get_formatted_discussion(),  # Formatted discussions
         }
         
         # Private information for this player

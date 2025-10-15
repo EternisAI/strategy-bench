@@ -5,30 +5,31 @@ from dataclasses import dataclass
 
 @dataclass
 class AmongUsConfig:
-    """Configuration for Among Us game.
+    """Configuration for Among Us game with spatial mechanics.
     
-    This is a simplified version focusing on social deduction elements:
-    - No spatial movement
-    - Abstract task completion
+    Features spatial movement, room-based tasks, and social deduction:
+    - Spatial movement via corridors and vents
+    - Room-specific task assignment
+    - Visibility limited to same room
     - Meetings, discussions, and voting
     - Impostor kills and crewmate tasks
     
     Attributes:
-        n_players: Number of players (4-10 recommended)
+        n_players: Number of players (4-15)
         n_impostors: Number of impostors
         tasks_per_player: Number of tasks each crewmate must complete
-        max_task_rounds: Maximum number of task rounds
-        max_discussion_rounds: Maximum discussion statements per meeting
+        max_task_rounds: Maximum number of task rounds (original: 50 for 7-player)
+        discussion_rounds: Discussion rounds per meeting (original: 3)
         emergency_meetings: Number of emergency meetings each player can call
-        kill_cooldown: Rounds impostors must wait between kills
+        kill_cooldown: Rounds impostors must wait between kills (original: 3)
     """
     n_players: int = 7
     n_impostors: int = 2
     tasks_per_player: int = 3
-    max_task_rounds: int = 20
-    max_discussion_rounds: int = 10
+    max_task_rounds: int = 50  # Match original (was 20)
+    discussion_rounds: int = 3  # Match original (was max_discussion_rounds: 10)
     emergency_meetings: int = 1  # Per player
-    kill_cooldown: int = 2  # Rounds between kills
+    kill_cooldown: int = 3  # Match original (was 2)
     
     def __post_init__(self):
         """Validate configuration."""

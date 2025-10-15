@@ -118,6 +118,44 @@ class SheriffEnv(BaseEnvironment):
             raise RuntimeError("Environment not initialized. Call reset() first.")
         return self.state
 
+    def _format_round_history(self) -> str:
+        """Format history of all previous rounds.
+        
+        Returns:
+            Formatted string of declarations and inspections
+        """
+        if not hasattr(self.state, 'history') or not self.state.history:
+            return "   (First round)"
+        
+        formatted = []
+        for event in self.state.history:
+            if event.get('type') == 'declaration':
+                formatted.append(
+                    f"   • Player {event['player']}: Declared {event['quantity']} {event['good']}"
+                )
+            elif event.get('type') == 'inspection':
+                result = "HONEST" if event['honest'] else "LYING"
+                formatted.append(
+                    f"      → Sheriff inspected: {result} (actual: {event.get('actual', 'N/A')})"
+                )
+        return "\n".join(formatted) if formatted else "   (No history yet)"
+    
+    def _format_player_standings(self) -> str:
+        """Format current player gold and bonuses.
+        
+        Returns:
+            Formatted string of player standings
+        """
+        st = self.state
+        formatted = []
+        for p in st.players:
+            formatted.append(
+                f"   • Player {p.pid}: {p.gold} gold, "
+                f"{len([c for c in p.stand if self.card_defs[c].kind == CardKind.LEGAL])} legal goods, "
+                f"{len([c for c in p.stand if self.card_defs[c].kind == CardKind.CONTRABAND])} contraband"
+            )
+        return "\n".join(formatted)
+    
     def _get_observations(self) -> Dict[int, Observation]:
         """Generate observations for all players."""
         st = self.state

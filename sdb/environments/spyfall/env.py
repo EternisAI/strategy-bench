@@ -651,6 +651,35 @@ class SpyfallEnv(BaseEnvironment):
                 self.state.final_vote.current_suspect = None
                 self.state.final_vote.votes = {}
     
+    def _format_qa_history(self) -> str:
+        """Format complete Q&A history for display.
+        
+        Returns:
+            Formatted string of all Q&A exchanges
+        """
+        if not self.state.qa_history:
+            return "   (No Q&A yet)"
+        
+        formatted = []
+        for qa in self.state.qa_history:
+            formatted.append(
+                f"   Turn {qa.turn}: Player {qa.asker} asked Player {qa.answerer}:\n"
+                f"      Q: \"{qa.question}\"\n"
+                f"      A: \"{qa.answer}\""
+            )
+        return "\n".join(formatted)
+    
+    def _format_game_state(self) -> str:
+        """Format current game state summary.
+        
+        Returns:
+            Formatted string of key game info
+        """
+        return f"""📊 GAME STATE:
+   • Turn: {self.state.turn}/{self.config.max_turns}
+   • Phase: {self.state.phase.value}
+   • Current Asker: Player {self.state.current_asker if self.state.current_asker is not None else "N/A"}"""
+    
     def _get_observations(self) -> Dict[int, Observation]:
         """Generate observations for all players."""
         observations = {}
@@ -674,6 +703,10 @@ class SpyfallEnv(BaseEnvironment):
                     for qa in self.state.qa_history
                 ],
                 "can_stop_clock": self.state.can_stop_clock(pid),
+                
+                # Formatted full context
+                "formatted_qa_history": self._format_qa_history(),
+                "formatted_game_state": self._format_game_state(),
             }
             
             # Add phase-specific info
@@ -682,25 +715,58 @@ class SpyfallEnv(BaseEnvironment):
             
             if self.state.phase == Phase.QANDA:
                 if self.state.awaiting_answer_from == pid:
-                    instruction = (
-                        "You need to answer the question. "
-                        "Respond with JSON: {\"type\": \"answer\", \"answer\": \"<your answer>\"}"
-                    )
+                    role_hint = f" (Your Role: {self.state.get_player_role(pid)})" if not self.state.is_spy(pid) else " (You're the SPY!)"
+                    location_hint = f" Location: {self.state.get_player_location(pid)}" if not self.state.is_spy(pid) else " You DON'T know the location!"
+                    
+                    instruction = f"""=== Q&A PHASE - YOUR TURN TO ANSWER ===
+
+{self._format_game_state()}
+
+YOUR ROLE:{role_hint}
+{location_hint}
+
+📜 COMPLETE Q&A HISTORY:
+{self._format_qa_history()}
+
+⚡ YOUR ACTION:
+Answer the question. {"Be vague to blend in!" if self.state.is_spy(pid) else "Be specific to prove you know the location!"}
+
+Respond with JSON:
+{{"type": "answer", "answer": "<your answer>"}}"""
+                    
                     if self.state.can_stop_clock(pid):
-                        instruction += " OR accuse someone: {\"type\": \"accuse\", \"suspect\": <player_id>}"
+                        instruction += "\n\nOR accuse: {\"type\": \"accuse\", \"suspect\": <player_id>}"
                     if self.state.is_spy(pid) and self.state.can_spy_guess():
-                        instruction += " OR guess location: {\"type\": \"spy_guess\", \"guess\": \"<location>\"}"
+                        instruction += f"\n\nOR guess location: {{\"type\": \"spy_guess\", \"guess\": \"<location>\"}} from {self.config.locations}"
                     obs_type = "act"
                 elif self.state.current_asker == pid:
                     targets = [i for i in range(self.config.n_players) if i != pid and i != self.state.cannot_ask_back]
-                    instruction = (
-                        f"Your turn to ask a question. Available targets: {targets}. "
-                        "Respond with JSON: {\"type\": \"ask\", \"target\": <player_id>, \"question\": \"<your question>\"}"
-                    )
+                    role_hint = f" (Your Role: {self.state.get_player_role(pid)})" if not self.state.is_spy(pid) else " (You're the SPY!)"
+                    location_hint = f" Location: {self.state.get_player_location(pid)}" if not self.state.is_spy(pid) else " You DON'T know the location!"
+                    
+                    instruction = f"""=== Q&A PHASE - YOUR TURN TO ASK ===
+
+{self._format_game_state()}
+
+YOUR ROLE:{role_hint}
+{location_hint}
+
+📜 COMPLETE Q&A HISTORY:
+{self._format_qa_history()}
+
+⚡ YOUR ACTION:
+Ask a question to another player. {"Ask vague questions to blend in!" if self.state.is_spy(pid) else "Ask questions that test if they know the location!"}
+
+Available targets: {targets}
+Cannot ask back to: {self.state.cannot_ask_back if self.state.cannot_ask_back is not None else "None"}
+
+Respond with JSON:
+{{"type": "ask", "target": <player_id>, "question": "<your question>"}}"""
+                    
                     if self.state.can_stop_clock(pid):
-                        instruction += " OR accuse someone: {\"type\": \"accuse\", \"suspect\": <player_id>}"
+                        instruction += "\n\nOR accuse: {\"type\": \"accuse\", \"suspect\": <player_id>}"
                     if self.state.is_spy(pid) and self.state.can_spy_guess():
-                        instruction += " OR guess location: {\"type\": \"spy_guess\", \"guess\": \"<location>\"}"
+                        instruction += f"\n\nOR guess location: {{\"type\": \"spy_guess\", \"guess\": \"<location>\"}} from {self.config.locations}"
                     obs_type = "act"
                 else:
                     instruction = "Waiting for other players."
