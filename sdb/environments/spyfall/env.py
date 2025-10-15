@@ -1,0 +1,780 @@
+"""Spyfall game environment."""
+
+import random
+from typing import Dict, List, Optional, Tuple
+
+from sdb.core.base_env import BaseEnvironment
+from sdb.core.types import Action, GameResult, Observation
+from sdb.environments.spyfall.config import SpyfallConfig
+from sdb.environments.spyfall.rules import (
+    assign_roles,
+    calculate_scores,
+    get_voting_result,
+    validate_accusation_target,
+    validate_question_target,
+    validate_spy_guess,
+)
+from sdb.environments.spyfall.state import SpyfallState
+from sdb.environments.spyfall.types import (
+    AccusationState,
+    FinalVoteState,
+    Phase,
+)
+from sdb.logging.formats import EventType
+
+
+class SpyfallEnv(BaseEnvironment):
+    """Spyfall game environment with Q&A and deduction mechanics."""
+    
+    def __init__(self, agents, config=None, game_id=None, logger=None):
+        """Initialize Spyfall environment.
+        
+        Args:
+            agents: List of agents (must match config.n_players)
+            config: SpyfallConfig instance
+            game_id: Optional game ID
+            logger: Optional GameLogger instance
+        """
+        self.config = config or SpyfallConfig()
+        super().__init__(agents, game_id, logger)
+        self.state: SpyfallState = SpyfallState()
+        self.rng = random.Random()
+    
+    def _validate_num_players(self, num_players: int) -> bool:
+        """Validate number of players."""
+        return 3 <= num_players <= 12
+    
+    def _get_current_player(self) -> Optional[int]:
+        """Get the current acting player."""
+        if self.state.phase == Phase.QANDA:
+            if self.state.awaiting_answer_from is not None:
+                return self.state.awaiting_answer_from
+            return self.state.current_asker
+        elif self.state.phase == Phase.ACCUSATION_VOTE:
+            # Return first player who hasn't voted yet
+            if self.state.accusation:
+                for voter in self.state.accusation.voters:
+                    if voter not in self.state.accusation.votes:
+                        return voter
+        elif self.state.phase == Phase.FINAL_VOTE:
+            if self.state.final_vote:
+                if self.state.final_vote.current_suspect is None:
+                    return self.state.final_vote.current_nominator
+                # Return first player who hasn't voted
+                for pid in range(self.config.n_players):
+                    if pid != self.state.final_vote.current_suspect and pid not in self.state.final_vote.votes:
+                        return pid
+        return None
+    
+    def get_winner(self) -> Optional[str]:
+        """Get the winner."""
+        return self.state.winner
+    
+    def get_win_reason(self) -> str:
+        """Get the reason for winning."""
+        return self.state.win_reason
+    
+    def reset(self) -> Dict[int, Observation]:
+        """Reset the game state."""
+        # Assign roles and location
+        location, spy_index, cards = assign_roles(self.config, self.rng)
+        
+        # Initialize state
+        self.state.phase = Phase.QANDA
+        self.state.turn = 0
+        self.state.location = location
+        self.state.spy_index = spy_index
+        self.state.cards = cards
+        self.state.qa_history = []
+        self.state.current_asker = self.config.dealer_index
+        self.state.awaiting_answer_from = None
+        self.state.cannot_ask_back = None
+        self.state.stops_used = {i: False for i in range(self.config.n_players)}
+        self.state.spy_guess_allowed = True
+        self.state.accusation = None
+        self.state.final_vote = None
+        self.state.winner = None
+        self.state.scores = {i: 0 for i in range(self.config.n_players)}
+        self.state.win_reason = ""
+        
+        # Log game start
+        if self.logger:
+            self.logger.log_event(
+                event_type=EventType.GAME_START,
+                data={
+                    "n_players": self.config.n_players,
+                    "location": location,
+                    "spy_index": spy_index,
+                    "dealer": self.config.dealer_index,
+                }
+            )
+        
+        return self._get_observations()
+    
+    def step(self, action: Action) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
+        """Execute one step of the game."""
+        # Handle action based on phase
+        if self.state.phase == Phase.QANDA:
+            self._handle_qanda_action(action)
+        elif self.state.phase == Phase.ACCUSATION_VOTE:
+            self._handle_accusation_vote(action)
+        elif self.state.phase == Phase.FINAL_VOTE:
+            self._handle_final_vote_action(action)
+        elif self.state.phase == Phase.SPY_GUESS:
+            self._handle_spy_guess_action(action)
+        
+        # Get observations
+        observations = self._get_observations()
+        
+        # Check if game is over
+        done = self.state.phase == Phase.GAME_END
+        
+        # Calculate rewards
+        rewards = {pid: 0.0 for pid in range(self.config.n_players)}
+        if done:
+            for pid, score in self.state.scores.items():
+                rewards[pid] = float(score)
+        
+        info = {
+            "phase": self.state.phase.value,
+            "turn": self.state.turn
+        }
+        
+        return observations, rewards, done, info
+    
+    def _handle_qanda_action(self, action: Action):
+        """Handle Q&A phase actions."""
+        action_type = action.data.get("type", "")
+        
+        if action_type == "ask":
+            self._handle_ask(action)
+        elif action_type == "answer":
+            self._handle_answer(action)
+        elif action_type == "accuse":
+            self._handle_accuse(action)
+        elif action_type == "spy_guess":
+            self._handle_spy_guess_initiation(action)
+        elif action_type == "wait":
+            pass  # No action needed
+        else:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": f"Unknown action type: {action_type}"}
+                )
+    
+    def _handle_ask(self, action: Action):
+        """Handle asking a question."""
+        target = action.data.get("target")
+        question = action.data.get("question", "")
+        
+        if not question:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "Empty question"}
+                )
+            return
+        
+        # Validate target
+        valid, error = validate_question_target(
+            action.player_id,
+            target,
+            self.config.n_players,
+            self.state.cannot_ask_back
+        )
+        
+        if not valid:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": error}
+                )
+            return
+        
+        # Log question
+        if self.logger:
+            self.logger.log_event(
+                EventType.DISCUSSION,
+                {
+                    "turn": self.state.turn,
+                    "asker": action.player_id,
+                    "target": target,
+                    "question": question,
+                },
+                is_private=False
+            )
+        
+        # Update state
+        self.state.awaiting_answer_from = target
+        self.state.turn += 1
+    
+    def _handle_answer(self, action: Action):
+        """Handle answering a question."""
+        answer = action.data.get("answer", "")
+        
+        if not answer:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "Empty answer"}
+                )
+            return
+        
+        asker = self.state.current_asker
+        answerer = action.player_id
+        
+        # Get the last question (should be the one being answered)
+        question = "unknown"
+        for event in reversed(self.state.qa_history):
+            if event.answerer == answerer:
+                question = event.question
+                break
+        
+        # Add to QA history
+        self.state.add_qa(asker, answerer, question, answer)
+        
+        # Log answer
+        if self.logger:
+            self.logger.log_event(
+                EventType.DISCUSSION,
+                {
+                    "turn": self.state.turn,
+                    "answerer": answerer,
+                    "answer": answer,
+                },
+                is_private=False
+            )
+        
+        # Answerer becomes the new asker
+        self.state.current_asker = answerer
+        self.state.awaiting_answer_from = None
+        self.state.cannot_ask_back = asker  # Can't ask back to previous asker
+        
+        # Check if turn limit reached
+        if self.state.turn >= self.config.max_turns:
+            self._start_final_voting()
+    
+    def _handle_accuse(self, action: Action):
+        """Handle stopping the clock to accuse someone."""
+        suspect = action.data.get("suspect")
+        
+        # Validate accusation
+        valid, error = validate_accusation_target(
+            action.player_id,
+            suspect,
+            self.config.n_players
+        )
+        
+        if not valid:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": error}
+                )
+            return
+        
+        # Mark stop used
+        self.state.stops_used[action.player_id] = True
+        self.state.spy_guess_allowed = False  # Spy can't guess after someone stops
+        
+        # Log accusation
+        if self.logger:
+            self.logger.log_event(
+                EventType.PLAYER_ACTION,
+                {
+                    "turn": self.state.turn,
+                    "accuser": action.player_id,
+                    "suspect": suspect,
+                    "action": "accuse",
+                },
+                is_private=False
+            )
+        
+        # Start accusation vote
+        voters = [i for i in range(self.config.n_players) if i != suspect]
+        self.state.accusation = AccusationState(
+            accuser=action.player_id,
+            suspect=suspect,
+            voters=voters,
+            votes={}
+        )
+        self.state.phase = Phase.ACCUSATION_VOTE
+    
+    def _handle_spy_guess_initiation(self, action: Action):
+        """Handle spy attempting to guess location."""
+        if action.player_id != self.state.spy_index:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "Only spy can guess location"}
+                )
+            return
+        
+        if not self.state.can_spy_guess():
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "Spy cannot guess location now"}
+                )
+            return
+        
+        # Log spy guess attempt
+        if self.logger:
+            self.logger.log_event(
+                EventType.PLAYER_ACTION,
+                {
+                    "turn": self.state.turn,
+                    "player_id": action.player_id,
+                    "action": "spy_guess_initiation",
+                },
+                is_private=False
+            )
+        
+        self.state.phase = Phase.SPY_GUESS
+    
+    def _handle_spy_guess_action(self, action: Action):
+        """Handle spy's location guess."""
+        guess = action.data.get("guess")
+        
+        # Validate guess
+        valid, is_correct, error = validate_spy_guess(
+            guess,
+            self.state.location,
+            self.config.locations
+        )
+        
+        if not valid:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": error}
+                )
+            return
+        
+        # Log guess
+        if self.logger:
+            self.logger.log_event(
+                EventType.PLAYER_ACTION,
+                {
+                    "player_id": action.player_id,
+                    "action": "spy_guess",
+                    "guess": guess,
+                    "correct": is_correct,
+                },
+                is_private=False
+            )
+        
+        # End game
+        if is_correct:
+            self.state.winner = "spy"
+            self.state.win_reason = "Spy guessed location correctly"
+        else:
+            self.state.winner = "non_spy"
+            self.state.win_reason = "Spy guessed location incorrectly"
+        
+        self.state.scores = calculate_scores(
+            self.config.n_players,
+            self.state.spy_index,
+            self.state.winner,
+            is_correct
+        )
+        self.state.phase = Phase.GAME_END
+        
+        if self.logger:
+            self.logger.log_event(
+                EventType.GAME_END,
+                {
+                    "winner": self.state.winner,
+                    "reason": self.state.win_reason,
+                    "scores": self.state.scores,
+                }
+            )
+    
+    def _handle_accusation_vote(self, action: Action):
+        """Handle voting on an accusation."""
+        vote = action.data.get("vote")
+        
+        if vote is None:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "No vote provided"}
+                )
+            return
+        
+        # Record vote
+        self.state.accusation.votes[action.player_id] = bool(vote)
+        
+        # Log vote
+        if self.logger:
+            self.logger.log_event(
+                EventType.VOTE_CAST,
+                {
+                    "voter": action.player_id,
+                    "vote": vote,
+                    "suspect": self.state.accusation.suspect,
+                },
+                is_private=True
+            )
+        
+        # Check if voting complete
+        if self.state.accusation.is_complete():
+            self._resolve_accusation()
+    
+    def _resolve_accusation(self):
+        """Resolve the accusation vote."""
+        passed = self.state.accusation.is_successful()
+        suspect = self.state.accusation.suspect
+        
+        # Log result
+        if self.logger:
+            self.logger.log_event(
+                EventType.VOTE_RESULT,
+                {
+                    "passed": passed,
+                    "suspect": suspect,
+                    "votes": self.state.accusation.votes,
+                }
+            )
+        
+        if passed:
+            # Accusation passed - game ends
+            is_spy = (suspect == self.state.spy_index)
+            
+            if is_spy:
+                self.state.winner = "non_spy"
+                self.state.win_reason = "Spy was correctly identified"
+            else:
+                self.state.winner = "spy"
+                self.state.win_reason = "Wrong player was accused"
+            
+            self.state.scores = calculate_scores(
+                self.config.n_players,
+                self.state.spy_index,
+                self.state.winner,
+                False
+            )
+            self.state.phase = Phase.GAME_END
+            
+            if self.logger:
+                self.logger.log_event(
+                    EventType.GAME_END,
+                    {
+                        "winner": self.state.winner,
+                        "reason": self.state.win_reason,
+                        "scores": self.state.scores,
+                    }
+                )
+        else:
+            # Accusation failed - return to Q&A or end game
+            if self.state.turn >= self.config.max_turns:
+                self._start_final_voting()
+            else:
+                self.state.phase = Phase.QANDA
+                self.state.accusation = None
+    
+    def _start_final_voting(self):
+        """Start final voting phase."""
+        # Log start of final voting
+        if self.logger:
+            self.logger.log_event(
+                EventType.PHASE_CHANGE,
+                {
+                    "from_phase": self.state.phase.value,
+                    "to_phase": "final_vote",
+                    "reason": "Turn limit reached",
+                }
+            )
+        
+        self.state.phase = Phase.FINAL_VOTE
+        self.state.final_vote = FinalVoteState(
+            current_nominator=0,  # Start with player 0
+            current_suspect=None,
+            votes={},
+            nominators_tried=set()
+        )
+    
+    def _handle_final_vote_action(self, action: Action):
+        """Handle final voting phase actions."""
+        action_type = action.data.get("type", "")
+        
+        if action_type == "nominate":
+            self._handle_final_nominate(action)
+        elif action_type == "vote":
+            self._handle_final_vote(action)
+        else:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": f"Unknown action type: {action_type}"}
+                )
+    
+    def _handle_final_nominate(self, action: Action):
+        """Handle nominating a suspect in final voting."""
+        suspect = action.data.get("suspect")
+        
+        # Validate
+        valid, error = validate_accusation_target(
+            action.player_id,
+            suspect,
+            self.config.n_players
+        )
+        
+        if not valid:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": error}
+                )
+            return
+        
+        # Log nomination
+        if self.logger:
+            self.logger.log_event(
+                EventType.PLAYER_ACTION,
+                {
+                    "nominator": action.player_id,
+                    "suspect": suspect,
+                    "action": "final_nominate",
+                },
+                is_private=False
+            )
+        
+        self.state.final_vote.current_suspect = suspect
+        self.state.final_vote.votes = {}
+    
+    def _handle_final_vote(self, action: Action):
+        """Handle voting in final voting phase."""
+        vote = action.data.get("vote")
+        
+        if vote is None:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "No vote provided"}
+                )
+            return
+        
+        # Record vote
+        self.state.final_vote.votes[action.player_id] = bool(vote)
+        
+        # Log vote
+        if self.logger:
+            self.logger.log_event(
+                EventType.VOTE_CAST,
+                {
+                    "voter": action.player_id,
+                    "vote": vote,
+                    "suspect": self.state.final_vote.current_suspect,
+                },
+                is_private=True
+            )
+        
+        # Check if voting complete
+        if self.state.final_vote.is_vote_complete():
+            self._resolve_final_vote()
+    
+    def _resolve_final_vote(self):
+        """Resolve final vote."""
+        passed = self.state.final_vote.is_vote_successful()
+        suspect = self.state.final_vote.current_suspect
+        
+        # Log result
+        if self.logger:
+            self.logger.log_event(
+                EventType.VOTE_RESULT,
+                {
+                    "passed": passed,
+                    "suspect": suspect,
+                    "votes": self.state.final_vote.votes,
+                }
+            )
+        
+        if passed:
+            # Vote passed - end game
+            is_spy = (suspect == self.state.spy_index)
+            
+            if is_spy:
+                self.state.winner = "non_spy"
+                self.state.win_reason = "Spy was correctly identified in final vote"
+            else:
+                self.state.winner = "spy"
+                self.state.win_reason = "Wrong player was accused in final vote"
+            
+            self.state.scores = calculate_scores(
+                self.config.n_players,
+                self.state.spy_index,
+                self.state.winner,
+                False
+            )
+            self.state.phase = Phase.GAME_END
+            
+            if self.logger:
+                self.logger.log_event(
+                    EventType.GAME_END,
+                    {
+                        "winner": self.state.winner,
+                        "reason": self.state.win_reason,
+                        "scores": self.state.scores,
+                    }
+                )
+        else:
+            # Vote failed - try next nominator or end game
+            self.state.final_vote.nominators_tried.add(self.state.final_vote.current_nominator)
+            
+            if len(self.state.final_vote.nominators_tried) >= self.config.n_players:
+                # All players tried - spy wins
+                self.state.winner = "spy"
+                self.state.win_reason = "No consensus reached in final voting"
+                self.state.scores = calculate_scores(
+                    self.config.n_players,
+                    self.state.spy_index,
+                    self.state.winner,
+                    False
+                )
+                self.state.phase = Phase.GAME_END
+                
+                if self.logger:
+                    self.logger.log_event(
+                        EventType.GAME_END,
+                        {
+                            "winner": self.state.winner,
+                            "reason": self.state.win_reason,
+                            "scores": self.state.scores,
+                        }
+                    )
+            else:
+                # Move to next nominator
+                next_nominator = (self.state.final_vote.current_nominator + 1) % self.config.n_players
+                self.state.final_vote.current_nominator = next_nominator
+                self.state.final_vote.current_suspect = None
+                self.state.final_vote.votes = {}
+    
+    def _get_observations(self) -> Dict[int, Observation]:
+        """Generate observations for all players."""
+        observations = {}
+        
+        for pid in range(self.config.n_players):
+            # Base observation data
+            obs_data = {
+                "turn": self.state.turn,
+                "max_turns": self.config.max_turns,
+                "is_spy": self.state.is_spy(pid),
+                "location": self.state.get_player_location(pid),
+                "role": self.state.get_player_role(pid),
+                "qa_history": [
+                    {
+                        "turn": qa.turn,
+                        "asker": qa.asker,
+                        "answerer": qa.answerer,
+                        "question": qa.question,
+                        "answer": qa.answer,
+                    }
+                    for qa in self.state.qa_history
+                ],
+                "can_stop_clock": self.state.can_stop_clock(pid),
+            }
+            
+            # Add phase-specific info
+            instruction = ""
+            obs_type = "observe"
+            
+            if self.state.phase == Phase.QANDA:
+                if self.state.awaiting_answer_from == pid:
+                    instruction = (
+                        "You need to answer the question. "
+                        "Respond with JSON: {\"type\": \"answer\", \"answer\": \"<your answer>\"}"
+                    )
+                    if self.state.can_stop_clock(pid):
+                        instruction += " OR accuse someone: {\"type\": \"accuse\", \"suspect\": <player_id>}"
+                    if self.state.is_spy(pid) and self.state.can_spy_guess():
+                        instruction += " OR guess location: {\"type\": \"spy_guess\", \"guess\": \"<location>\"}"
+                    obs_type = "act"
+                elif self.state.current_asker == pid:
+                    targets = [i for i in range(self.config.n_players) if i != pid and i != self.state.cannot_ask_back]
+                    instruction = (
+                        f"Your turn to ask a question. Available targets: {targets}. "
+                        "Respond with JSON: {\"type\": \"ask\", \"target\": <player_id>, \"question\": \"<your question>\"}"
+                    )
+                    if self.state.can_stop_clock(pid):
+                        instruction += " OR accuse someone: {\"type\": \"accuse\", \"suspect\": <player_id>}"
+                    if self.state.is_spy(pid) and self.state.can_spy_guess():
+                        instruction += " OR guess location: {\"type\": \"spy_guess\", \"guess\": \"<location>\"}"
+                    obs_type = "act"
+                else:
+                    instruction = "Waiting for other players."
+                    obs_type = "observe"
+            
+            elif self.state.phase == Phase.ACCUSATION_VOTE:
+                if pid == self.state.accusation.suspect:
+                    instruction = f"You are accused of being the spy! Waiting for vote result."
+                    obs_type = "observe"
+                elif pid in self.state.accusation.voters and pid not in self.state.accusation.votes:
+                    instruction = (
+                        f"Player {self.state.accusation.suspect} is accused of being the spy. "
+                        "Vote yes/no (unanimous yes needed). "
+                        "Respond with JSON: {\"type\": \"vote\", \"vote\": true/false}"
+                    )
+                    obs_type = "act"
+                else:
+                    instruction = "Waiting for votes."
+                    obs_type = "observe"
+                
+                obs_data["accusation"] = {
+                    "accuser": self.state.accusation.accuser,
+                    "suspect": self.state.accusation.suspect,
+                }
+            
+            elif self.state.phase == Phase.FINAL_VOTE:
+                if self.state.final_vote.current_suspect is None:
+                    if pid == self.state.final_vote.current_nominator:
+                        instruction = (
+                            "Final voting: Nominate a suspect. "
+                            "Respond with JSON: {\"type\": \"nominate\", \"suspect\": <player_id>}"
+                        )
+                        obs_type = "act"
+                    else:
+                        instruction = "Waiting for nomination."
+                        obs_type = "observe"
+                else:
+                    if pid == self.state.final_vote.current_suspect:
+                        instruction = "You are nominated! Waiting for vote result."
+                        obs_type = "observe"
+                    elif pid not in self.state.final_vote.votes:
+                        instruction = (
+                            f"Player {self.state.final_vote.current_suspect} is nominated. "
+                            "Vote yes/no (unanimous yes needed). "
+                            "Respond with JSON: {\"type\": \"vote\", \"vote\": true/false}"
+                        )
+                        obs_type = "act"
+                    else:
+                        instruction = "Waiting for votes."
+                        obs_type = "observe"
+            
+            elif self.state.phase == Phase.SPY_GUESS:
+                if pid == self.state.spy_index:
+                    instruction = (
+                        f"Guess the location from: {self.config.locations}. "
+                        "Respond with JSON: {\"type\": \"guess\", \"guess\": \"<location>\"}"
+                    )
+                    obs_type = "act"
+                else:
+                    instruction = "The spy is guessing the location!"
+                    obs_type = "observe"
+            
+            elif self.state.phase == Phase.GAME_END:
+                instruction = f"Game over! Winner: {self.state.winner}"
+                obs_type = "observe"
+            
+            obs_data["instruction"] = instruction
+            
+            observations[pid] = Observation(
+                player_id=pid,
+                obs_type=obs_type,
+                phase=self.state.phase.value,
+                data=obs_data
+            )
+        
+        return observations
+

@@ -1,0 +1,591 @@
+"""Simplified Among Us game environment.
+
+This is a simplified version focusing on social deduction:
+- No spatial movement (abstract task completion)
+- Task rounds where crewmates complete tasks and impostors can kill
+- Meetings triggered by body reports or emergency buttons
+- Discussion and voting phases
+- Win conditions based on tasks, eliminations, or impostor majority
+"""
+
+import random
+from typing import Dict, List, Optional, Tuple
+
+from sdb.core.base_env import BaseEnvironment
+from sdb.core.types import Action, GameResult, Observation
+from sdb.environments.among_us.config import AmongUsConfig
+from sdb.environments.among_us.rules import (
+    assign_roles,
+    check_win_condition,
+    get_vote_result,
+    validate_emergency_call,
+    validate_kill,
+    validate_vote,
+)
+from sdb.environments.among_us.state import AmongUsState
+from sdb.environments.among_us.types import (
+    MeetingResult,
+    Phase,
+    PlayerRole,
+    PlayerState,
+    TaskRoundResult,
+)
+from sdb.logging.formats import EventType
+
+
+class AmongUsEnv(BaseEnvironment):
+    """Simplified Among Us environment focusing on social deduction."""
+    
+    def __init__(self, agents, config=None, game_id=None, logger=None):
+        """Initialize Among Us environment.
+        
+        Args:
+            agents: List of agents (must match config.n_players)
+            config: AmongUsConfig instance
+            game_id: Optional game ID
+            logger: Optional GameLogger instance
+        """
+        self.config = config or AmongUsConfig()
+        super().__init__(agents, game_id, logger)
+        self.state: AmongUsState = AmongUsState()
+        self.rng = random.Random()
+        
+        # Track actions for current task round
+        self.pending_task_actions: Dict[int, Action] = {}
+    
+    def _validate_num_players(self, num_players: int) -> bool:
+        """Validate number of players."""
+        return 4 <= num_players <= 15
+    
+    def _get_current_player(self) -> Optional[int]:
+        """Get the current acting player."""
+        # In this simplified version, most phases have all players act simultaneously
+        # Return first player who hasn't acted yet
+        alive = self.state.get_alive_players()
+        
+        if self.state.phase == Phase.TASK:
+            # Return first player who hasn't submitted action
+            for pid in alive:
+                if pid not in self.pending_task_actions:
+                    return pid
+        elif self.state.phase == Phase.DISCUSSION:
+            # Everyone can discuss
+            return alive[0] if alive else None
+        elif self.state.phase == Phase.VOTING:
+            # Return first player who hasn't voted
+            for pid in alive:
+                if pid not in self.state.current_votes:
+                    return pid
+        
+        return None
+    
+    def get_winner(self) -> Optional[str]:
+        """Get the winner."""
+        return self.state.winner
+    
+    def get_win_reason(self) -> str:
+        """Get the reason for winning."""
+        return self.state.win_reason
+    
+    def reset(self) -> Dict[int, Observation]:
+        """Reset the game state."""
+        # Assign roles
+        roles = assign_roles(self.config, self.rng)
+        
+        # Initialize player states
+        self.state.players = {}
+        for i, role in enumerate(roles):
+            self.state.players[i] = PlayerState(
+                player_id=i,
+                name=self.agents[i].name,
+                role=role,
+                is_alive=True,
+                tasks_completed=0,
+                total_tasks=self.config.tasks_per_player if role == PlayerRole.CREWMATE else 0,
+                has_called_emergency=False
+            )
+        
+        # Initialize state
+        self.state.phase = Phase.TASK
+        self.state.round_number = 0
+        self.state.task_round_results = []
+        self.state.meeting_results = []
+        self.state.impostor_kill_cooldowns = {
+            pid: 0 for pid, p in self.state.players.items() if p.role == PlayerRole.IMPOSTOR
+        }
+        self.state.current_meeting_statements = []
+        self.state.current_votes = {}
+        self.state.winner = None
+        self.state.win_reason = ""
+        
+        self.pending_task_actions = {}
+        
+        # Log game start
+        if self.logger:
+            self.logger.log_event(
+                event_type=EventType.GAME_START,
+                data={
+                    "n_players": self.config.n_players,
+                    "n_impostors": self.config.n_impostors,
+                    "roles": [r.value for r in roles],
+                }
+            )
+        
+        return self._get_observations()
+    
+    def step(self, action: Action) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
+        """Execute one step of the game."""
+        # Handle action based on phase
+        if self.state.phase == Phase.TASK:
+            self._handle_task_action(action)
+        elif self.state.phase == Phase.DISCUSSION:
+            self._handle_discussion_action(action)
+        elif self.state.phase == Phase.VOTING:
+            self._handle_voting_action(action)
+        
+        # Get observations
+        observations = self._get_observations()
+        
+        # Check if game is over
+        done = self.state.phase == Phase.GAME_END
+        
+        # Calculate rewards (only at game end)
+        rewards = {}
+        if done:
+            for pid, player in self.state.players.items():
+                if self.state.winner == "crewmates":
+                    rewards[pid] = 1.0 if player.role == PlayerRole.CREWMATE else 0.0
+                elif self.state.winner == "impostors":
+                    rewards[pid] = 1.0 if player.role == PlayerRole.IMPOSTOR else 0.0
+                else:
+                    rewards[pid] = 0.5  # Draw
+        else:
+            rewards = {pid: 0.0 for pid in self.state.players}
+        
+        info = {
+            "phase": self.state.phase.value,
+            "round": self.state.round_number,
+            "task_completion": self.state.get_total_task_completion()
+        }
+        
+        return observations, rewards, done, info
+    
+    def _handle_task_action(self, action: Action):
+        """Handle task phase actions."""
+        # Store action
+        self.pending_task_actions[action.player_id] = action
+        
+        # Check if all alive players have acted
+        alive = self.state.get_alive_players()
+        if len(self.pending_task_actions) >= len(alive):
+            self._resolve_task_round()
+    
+    def _resolve_task_round(self):
+        """Resolve all task actions for this round."""
+        result = TaskRoundResult()
+        
+        # Process each action
+        for pid, action in self.pending_task_actions.items():
+            player = self.state.players[pid]
+            action_type = action.data.get("type", "")
+            
+            if player.role == PlayerRole.CREWMATE:
+                if action_type == "complete_task":
+                    # Complete a task
+                    if player.tasks_completed < player.total_tasks:
+                        player.tasks_completed += 1
+                        result.tasks_completed.append(pid)
+                        
+                        if self.logger:
+                            self.logger.log_event(
+                                EventType.PLAYER_ACTION,
+                                {
+                                    "round": self.state.round_number,
+                                    "player_id": pid,
+                                    "action": "complete_task",
+                                    "progress": f"{player.tasks_completed}/{player.total_tasks}"
+                                }
+                            )
+                elif action_type == "call_emergency":
+                    # Call emergency meeting
+                    valid, error = validate_emergency_call(pid, player.has_called_emergency)
+                    if valid:
+                        player.has_called_emergency = True
+                        result.emergency_called = pid
+                        
+                        if self.logger:
+                            self.logger.log_event(
+                                EventType.PLAYER_ACTION,
+                                {
+                                    "round": self.state.round_number,
+                                    "player_id": pid,
+                                    "action": "call_emergency"
+                                }
+                            )
+            
+            elif player.role == PlayerRole.IMPOSTOR:
+                if action_type == "kill":
+                    # Attempt kill
+                    target = action.data.get("target")
+                    can_kill = self.state.can_impostor_kill(pid)
+                    valid, error = validate_kill(pid, target, alive := self.state.get_alive_players(), can_kill)
+                    
+                    if valid:
+                        # Kill successful
+                        self.state.players[target].is_alive = False
+                        result.kills.append((pid, target))
+                        self.state.impostor_kill_cooldowns[pid] = self.config.kill_cooldown
+                        
+                        if self.logger:
+                            self.logger.log_event(
+                                EventType.PLAYER_ACTION,
+                                {
+                                    "round": self.state.round_number,
+                                    "killer": pid,
+                                    "victim": target,
+                                    "action": "kill"
+                                },
+                                is_private=True
+                            )
+                    elif self.logger:
+                        self.logger.log_event(
+                            EventType.ERROR,
+                            {"player_id": pid, "error": error}
+                        )
+                elif action_type == "report_body":
+                    # Impostor can also report bodies
+                    victim = action.data.get("victim")
+                    if victim is not None and not self.state.players[victim].is_alive:
+                        result.body_reported = (pid, victim)
+        
+        # Check for body reports from crewmates
+        for pid, action in self.pending_task_actions.items():
+            if action.data.get("type") == "report_body":
+                victim = action.data.get("victim")
+                if victim is not None and not self.state.players[victim].is_alive:
+                    result.body_reported = (pid, victim)
+                    break  # Only one report needed
+        
+        # Store result
+        self.state.task_round_results.append(result)
+        self.pending_task_actions = {}
+        
+        # Decrease kill cooldowns
+        self.state.decrease_kill_cooldowns()
+        
+        # Increment round
+        self.state.round_number += 1
+        
+        # Check for meeting trigger
+        if result.body_reported or result.emergency_called:
+            self._start_meeting(result)
+        else:
+            # Check win condition
+            if self._check_game_over():
+                return
+            
+            # Check round limit
+            if self.state.round_number >= self.config.max_task_rounds:
+                # Game ends in impostor victory (ran out of time)
+                self.state.winner = "impostors"
+                self.state.win_reason = "Time limit reached"
+                self.state.phase = Phase.GAME_END
+                
+                if self.logger:
+                    self.logger.log_event(
+                        EventType.GAME_END,
+                        {
+                            "winner": self.state.winner,
+                            "reason": self.state.win_reason
+                        }
+                    )
+    
+    def _start_meeting(self, trigger: TaskRoundResult):
+        """Start a meeting phase."""
+        # Log meeting start
+        if self.logger:
+            if trigger.body_reported:
+                reporter, victim = trigger.body_reported
+                self.logger.log_event(
+                    EventType.PHASE_CHANGE,
+                    {
+                        "from_phase": "task",
+                        "to_phase": "discussion",
+                        "trigger": "body_report",
+                        "reporter": reporter,
+                        "victim": victim
+                    }
+                )
+            elif trigger.emergency_called:
+                self.logger.log_event(
+                    EventType.PHASE_CHANGE,
+                    {
+                        "from_phase": "task",
+                        "to_phase": "discussion",
+                        "trigger": "emergency",
+                        "caller": trigger.emergency_called
+                    }
+                )
+        
+        self.state.phase = Phase.DISCUSSION
+        self.state.current_meeting_statements = []
+        self.state.current_votes = {}
+    
+    def _handle_discussion_action(self, action: Action):
+        """Handle discussion phase actions."""
+        action_type = action.data.get("type", "")
+        
+        if action_type == "discuss":
+            statement = action.data.get("statement", "")
+            if statement:
+                self.state.current_meeting_statements.append((action.player_id, statement))
+                
+                # Broadcast statement
+                player_name = self.state.players[action.player_id].name
+                if self.logger:
+                    self.logger.log_event(
+                        EventType.DISCUSSION,
+                        {
+                            "round": self.state.round_number,
+                            "player_id": action.player_id,
+                            "player_name": player_name,
+                            "statement": statement
+                        },
+                        is_private=False
+                    )
+        
+        elif action_type == "vote_now":
+            # Move to voting
+            self.state.phase = Phase.VOTING
+        
+        # Check discussion limit
+        if len(self.state.current_meeting_statements) >= self.config.max_discussion_rounds:
+            self.state.phase = Phase.VOTING
+    
+    def _handle_voting_action(self, action: Action):
+        """Handle voting phase actions."""
+        target = action.data.get("target")  # None means skip
+        
+        # Validate vote
+        alive = self.state.get_alive_players()
+        valid, error = validate_vote(action.player_id, target, alive)
+        
+        if not valid:
+            if self.logger:
+                self.logger.log_event(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": error}
+                )
+            return
+        
+        # Record vote
+        self.state.current_votes[action.player_id] = target
+        
+        # Log vote
+        if self.logger:
+            self.logger.log_event(
+                EventType.VOTE_CAST,
+                {
+                    "round": self.state.round_number,
+                    "voter": action.player_id,
+                    "target": target if target is not None else "skip"
+                },
+                is_private=True
+            )
+        
+        # Check if all alive players have voted
+        if len(self.state.current_votes) >= len(alive):
+            self._resolve_voting()
+    
+    def _resolve_voting(self):
+        """Resolve the voting phase."""
+        ejected, is_skip = get_vote_result(self.state.current_votes)
+        
+        # Create meeting result
+        result = MeetingResult(
+            discussion_statements=self.state.current_meeting_statements,
+            votes=self.state.current_votes,
+            ejected=ejected,
+            skipped=is_skip
+        )
+        self.state.meeting_results.append(result)
+        
+        # Log result
+        if self.logger:
+            self.logger.log_event(
+                EventType.VOTE_RESULT,
+                {
+                    "ejected": ejected,
+                    "skipped": is_skip,
+                    "votes": self.state.current_votes
+                }
+            )
+        
+        # Eject player if not skipped/tied
+        if ejected is not None:
+            self.state.players[ejected].is_alive = False
+            
+            if self.logger:
+                self.logger.log_event(
+                    EventType.PLAYER_ELIMINATED,
+                    {
+                        "round": self.state.round_number,
+                        "player_id": ejected,
+                        "player_name": self.state.players[ejected].name,
+                        "role": self.state.players[ejected].role.value,
+                        "by": "vote"
+                    }
+                )
+        
+        # Clear meeting state
+        self.state.current_meeting_statements = []
+        self.state.current_votes = {}
+        
+        # Check win condition
+        if self._check_game_over():
+            return
+        
+        # Return to task phase
+        self.state.phase = Phase.TASK
+    
+    def _check_game_over(self) -> bool:
+        """Check if game is over."""
+        alive_crewmates = len(self.state.get_alive_crewmates())
+        alive_impostors = len(self.state.get_alive_impostors())
+        task_completion = self.state.get_total_task_completion()
+        
+        game_over, winner, reason = check_win_condition(
+            alive_crewmates,
+            alive_impostors,
+            task_completion
+        )
+        
+        if game_over:
+            self.state.winner = winner
+            self.state.win_reason = reason
+            self.state.phase = Phase.GAME_END
+            
+            if self.logger:
+                self.logger.log_event(
+                    EventType.GAME_END,
+                    {
+                        "winner": winner,
+                        "reason": reason,
+                        "task_completion": task_completion,
+                        "alive_crewmates": alive_crewmates,
+                        "alive_impostors": alive_impostors
+                    }
+                )
+            
+            return True
+        
+        return False
+    
+    def _get_observations(self) -> Dict[int, Observation]:
+        """Generate observations for all players."""
+        observations = {}
+        alive = self.state.get_alive_players()
+        
+        for pid in self.state.players:
+            player = self.state.players[pid]
+            
+            # Base observation data
+            obs_data = {
+                "round": self.state.round_number,
+                "is_alive": player.is_alive,
+                "role": player.role.value,
+                "alive_count": len(alive),
+                "task_completion": self.state.get_total_task_completion(),
+            }
+            
+            # Add role-specific info
+            if player.role == PlayerRole.CREWMATE:
+                obs_data["my_tasks"] = f"{player.tasks_completed}/{player.total_tasks}"
+                obs_data["can_call_emergency"] = not player.has_called_emergency
+            elif player.role == PlayerRole.IMPOSTOR:
+                obs_data["fellow_impostors"] = [
+                    self.state.players[imp_id].name
+                    for imp_id in self.state.get_alive_impostors()
+                    if imp_id != pid
+                ]
+                obs_data["can_kill"] = self.state.can_impostor_kill(pid)
+            
+            # Add phase-specific instructions
+            instruction = ""
+            obs_type = "observe"
+            
+            if not player.is_alive:
+                instruction = "You are dead. You can only observe."
+                obs_type = "observe"
+            
+            elif self.state.phase == Phase.TASK:
+                if player.role == PlayerRole.CREWMATE:
+                    actions = []
+                    if player.tasks_completed < player.total_tasks:
+                        actions.append("{\"type\": \"complete_task\"}")
+                    if not player.has_called_emergency:
+                        actions.append("{\"type\": \"call_emergency\"}")
+                    # Check for dead bodies to report
+                    dead_players = [p for p in self.state.players.values() if not p.is_alive]
+                    if dead_players:
+                        actions.append("{\"type\": \"report_body\", \"victim\": <player_id>}")
+                    
+                    instruction = f"TASK PHASE: Choose an action. Options: {' OR '.join(actions)}"
+                    obs_type = "act"
+                else:  # Impostor
+                    actions = []
+                    if self.state.can_impostor_kill(pid):
+                        actions.append("{\"type\": \"kill\", \"target\": <player_id>}")
+                    else:
+                        actions.append(f"{{\"type\": \"wait\"}} (kill on cooldown: {self.state.impostor_kill_cooldowns[pid]} rounds)")
+                    dead_players = [p for p in self.state.players.values() if not p.is_alive]
+                    if dead_players:
+                        actions.append("{\"type\": \"report_body\", \"victim\": <player_id>}")
+                    
+                    instruction = f"TASK PHASE: Choose an action. Options: {' OR '.join(actions)}"
+                    obs_type = "act"
+            
+            elif self.state.phase == Phase.DISCUSSION:
+                instruction = (
+                    "DISCUSSION PHASE: Make a statement OR move to voting. "
+                    "Respond with JSON: {\"type\": \"discuss\", \"statement\": \"<your statement>\"} "
+                    "OR {\"type\": \"vote_now\"}"
+                )
+                obs_type = "act"
+                obs_data["discussion"] = [
+                    f"{self.state.players[speaker].name}: {stmt}"
+                    for speaker, stmt in self.state.current_meeting_statements
+                ]
+            
+            elif self.state.phase == Phase.VOTING:
+                if pid not in self.state.current_votes:
+                    instruction = (
+                        "VOTING PHASE: Vote to eject a player or skip. "
+                        "Respond with JSON: {\"type\": \"vote\", \"target\": <player_id>} "
+                        "OR {\"type\": \"vote\", \"target\": null} to skip"
+                    )
+                    obs_type = "act"
+                else:
+                    instruction = "Waiting for other votes."
+                    obs_type = "observe"
+                
+                obs_data["discussion"] = [
+                    f"{self.state.players[speaker].name}: {stmt}"
+                    for speaker, stmt in self.state.current_meeting_statements
+                ]
+            
+            elif self.state.phase == Phase.GAME_END:
+                instruction = f"Game over! Winner: {self.state.winner}"
+                obs_type = "observe"
+            
+            obs_data["instruction"] = instruction
+            
+            observations[pid] = Observation(
+                player_id=pid,
+                obs_type=obs_type,
+                phase=self.state.phase.value,
+                data=obs_data
+            )
+        
+        return observations
+

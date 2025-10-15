@@ -289,6 +289,63 @@ Respond in the following format:
                     evidence=[f"Nominated player {nom}"]
                 )
     
+    def _build_generic_action_prompt(self, observation: Observation) -> str:
+        """Build generic action prompt for non-Secret-Hitler games.
+        
+        Args:
+            observation: Current observation
+            
+        Returns:
+            Formatted prompt string
+        """
+        phase = observation.phase.name if hasattr(observation, 'phase') else "UNKNOWN"
+        
+        prompt_parts = [
+            f"=== GAME - {phase} ===",
+        ]
+        
+        # Add role/team info if available
+        if "role" in observation.data:
+            prompt_parts.append(f"Your Role: {observation.data['role'].upper()}")
+        if "team" in observation.data:
+            prompt_parts.append(f"Your Team: {observation.data['team'].upper()}")
+        if "role_info" in observation.data:
+            prompt_parts.append(f"\n{observation.data['role_info']}")
+        
+        # Add game state
+        game_info = []
+        for key in ["phase", "quest_number", "quests_succeeded", "quests_failed", "round_step", "sheriff", "gold"]:
+            if key in observation.data:
+                game_info.append(f"{key}: {observation.data[key]}")
+        if game_info:
+            prompt_parts.append(f"\nGame State: {', '.join(game_info)}")
+        
+        # Add recent memories
+        recent_memories = self.memory.get_recent(n=5)
+        if recent_memories:
+            prompt_parts.append("\n📝 Recent Events:")
+            for mem in recent_memories[-3:]:
+                prompt_parts.append(f"   - {mem.content}")
+        
+        # Add the instruction (most important!)
+        instruction = observation.data.get("instruction", "")
+        if instruction:
+            prompt_parts.append(f"\n⚡ ACTION REQUIRED:")
+            prompt_parts.append(f"{instruction}")
+        
+        # Add all observation data as JSON for full context
+        prompt_parts.append(f"\n📊 Full Observation:")
+        import json
+        # Filter out large/redundant fields
+        filtered_data = {k: v for k, v in observation.data.items() 
+                        if k not in ["instruction", "role_info"] and not k.startswith("_")}
+        prompt_parts.append(json.dumps(filtered_data, indent=2))
+        
+        prompt_parts.append("\n🎯 Provide your action in JSON format as specified in the instruction above.")
+        prompt_parts.append("Format: {\"type\": \"action_type\", ...other fields...}")
+        
+        return "\n".join(prompt_parts)
+    
     def _build_action_prompt(self, observation: Observation) -> str:
         """Build detailed prompt for action decision with memory and beliefs.
         
@@ -298,6 +355,11 @@ Respond in the following format:
         Returns:
             Formatted prompt string
         """
+        # Check if game provides explicit instruction (for generic games like Avalon, Sheriff, etc.)
+        if "instruction" in observation.data and observation.data["instruction"]:
+            return self._build_generic_action_prompt(observation)
+        
+        # Otherwise, use Secret Hitler-specific prompts
         action_type = observation.data.get("action_required", "observe")
         phase = observation.phase.name if hasattr(observation, 'phase') else "UNKNOWN"
         
@@ -420,7 +482,7 @@ Respond in the following format:
         return "\n".join(prompt_parts)
     
     def _parse_action_from_llm(self, llm_response: str, observation: Observation) -> Action:
-        """Parse action from LLM response for Secret Hitler.
+        """Parse action from LLM response (handles both JSON and Secret Hitler format).
         
         Args:
             llm_response: Response from LLM
@@ -429,6 +491,41 @@ Respond in the following format:
         Returns:
             Parsed action
         """
+        import json
+        import re
+        
+        # First try to extract and parse JSON (for generic games like Avalon, Sheriff)
+        # Look for JSON objects in the response (handles nested structures)
+        # Try to find a complete JSON object with "type" field
+        if '{' in llm_response and '"type"' in llm_response:
+            # Find the start of JSON
+            start = llm_response.find('{')
+            if start >= 0:
+                # Try to parse from this position
+                brace_count = 0
+                for i in range(start, len(llm_response)):
+                    if llm_response[i] == '{':
+                        brace_count += 1
+                    elif llm_response[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            # Found matching closing brace
+                            json_str = llm_response[start:i+1]
+                            try:
+                                action_data = json.loads(json_str)
+                                if "type" in action_data:
+                                    print(f"[DEBUG] Parsed JSON action: {action_data}")  # DEBUG
+                                    return Action(
+                                        player_id=self.player_id,
+                                        action_type=ActionType.SPEAK,  # Generic type
+                                        data=action_data
+                                    )
+                            except json.JSONDecodeError as e:
+                                print(f"[DEBUG] JSON parse failed: {e}, json_str: {json_str[:100]}")  # DEBUG
+                                pass
+                            break
+        
+        # Fall back to Secret Hitler-specific parsing
         action_type = observation.data.get("action_required", "speak")
         response = llm_response.strip().lower()
         

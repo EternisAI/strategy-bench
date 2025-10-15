@@ -161,6 +161,91 @@ registry.register(
     communication="open"
 )
 
+# Register Sheriff of Nottingham
+from sdb.environments.sheriff import SheriffEnv
+
+registry.register(
+    name="sheriff",
+    env_class=SheriffEnv,
+    description="Sheriff of Nottingham: A bluffing and negotiation game where merchants smuggle contraband",
+    min_players=3,
+    max_players=5,
+    difficulty="medium",
+    tags=["bluffing", "negotiation", "inspection", "bribery", "smuggling", "economics"],
+    complexity="medium",
+    game_length="medium",
+    deception_level="medium",
+    communication="open"
+)
+
+# Register Avalon
+from sdb.environments.avalon import AvalonEnv
+
+registry.register(
+    name="avalon",
+    env_class=AvalonEnv,
+    description="Avalon: A team-based deduction game where Good tries to complete quests and Evil sabotages them",
+    min_players=5,
+    max_players=10,
+    difficulty="hard",
+    tags=["deduction", "voting", "hidden_role", "team_game", "quests", "assassination"],
+    complexity="high",
+    game_length="medium",
+    deception_level="high",
+    communication="open"
+)
+
+# Register Werewolf
+from sdb.environments.werewolf import WerewolfEnv
+
+registry.register(
+    name="werewolf",
+    env_class=WerewolfEnv,
+    description="Werewolf: A classic social deduction game with night/day cycles where werewolves hunt villagers",
+    min_players=5,
+    max_players=20,
+    difficulty="medium",
+    tags=["deduction", "voting", "hidden_role", "night_day", "debate", "elimination"],
+    complexity="medium",
+    game_length="medium",
+    deception_level="high",
+    communication="open"
+)
+
+# Register Spyfall
+from sdb.environments.spyfall import SpyfallEnv
+
+registry.register(
+    name="spyfall",
+    env_class=SpyfallEnv,
+    description="Spyfall: A deduction game where players ask questions to find the spy who doesn't know the location",
+    min_players=3,
+    max_players=12,
+    difficulty="medium",
+    tags=["deduction", "questioning", "hidden_role", "spy", "location", "guessing"],
+    complexity="medium",
+    game_length="short",
+    deception_level="high",
+    communication="structured"
+)
+
+# Register Among Us
+from sdb.environments.among_us import AmongUsEnv
+
+registry.register(
+    name="among_us",
+    env_class=AmongUsEnv,
+    description="Among Us: A social deduction game where crewmates complete tasks while impostors sabotage and eliminate",
+    min_players=4,
+    max_players=15,
+    difficulty="medium",
+    tags=["deduction", "voting", "hidden_role", "tasks", "elimination", "meetings"],
+    complexity="medium",
+    game_length="medium",
+    deception_level="high",
+    communication="meetings"
+)
+
 
 def get_env(name: str) -> Type[BaseEnvironment]:
     """Get environment class by name.
