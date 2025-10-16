@@ -35,6 +35,9 @@ class PlayerState:
     location: str = "Cafeteria"  # Current room name
     assigned_tasks: List[tuple[str, str]] = field(default_factory=list)  # [(task_name, room_name), ...]
     
+    # Error tracking
+    last_error: str = ""
+    
     def task_progress(self) -> float:
         """Get task completion progress (0.0 to 1.0)."""
         return self.tasks_completed / self.total_tasks if self.total_tasks > 0 else 0.0

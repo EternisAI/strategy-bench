@@ -76,21 +76,27 @@ def check_win_condition(
     return False, None, ""
 
 
-def get_vote_result(votes: Dict[int, int]) -> Tuple[int | None, int]:
+def get_vote_result(
+    votes: Dict[int, int | None],
+    n_alive: int,
+    require_majority: bool = True
+) -> Tuple[int | None, int]:
     """Determine who gets eliminated by vote.
     
     Args:
-        votes: Dictionary mapping voter_id -> voted_for_id
+        votes: Dictionary mapping voter_id -> voted_for_id (None = No-Elimination)
+        n_alive: Number of alive players
+        require_majority: If True, requires >50% to eliminate (default: True)
         
     Returns:
         Tuple of (eliminated_player_id, vote_count)
-        Returns (None, 0) if there's a tie
+        Returns (None, 0) if there's a tie, no majority, or No-Elimination wins
     """
     if not votes:
         return None, 0
     
-    # Count votes
-    vote_counts: Dict[int, int] = {}
+    # Count votes (None votes count toward No-Elimination)
+    vote_counts: Dict[int | None, int] = {}
     for voted_for in votes.values():
         vote_counts[voted_for] = vote_counts.get(voted_for, 0) + 1
     
@@ -102,7 +108,20 @@ def get_vote_result(votes: Dict[int, int]) -> Tuple[int | None, int]:
     if len(players_with_max) > 1:
         return None, 0
     
-    return players_with_max[0], max_votes
+    leader = players_with_max[0]
+    
+    # Check if No-Elimination won
+    if leader is None:
+        return None, 0
+    
+    # Check majority requirement
+    if require_majority:
+        from math import floor
+        required_votes = floor(n_alive / 2) + 1
+        if max_votes < required_votes:
+            return None, 0  # No elimination - didn't reach majority
+    
+    return leader, max_votes
 
 
 def get_max_bidders(bids: Dict[int, int]) -> List[int]:

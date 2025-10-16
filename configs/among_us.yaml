@@ -1,0 +1,38 @@
+# Among Us Game Configuration
+
+game: among_us
+
+# Number of players (4-15)
+n_players: 6
+
+# Role distribution
+n_impostors: 2            # Number of impostors
+
+# Task settings
+n_tasks_per_player: 5     # Tasks assigned to each crewmate
+task_completion_time: 1   # Rounds to complete a task
+
+# Game mechanics
+max_task_rounds: 50       # Maximum task phase rounds
+discussion_rounds: 2      # Rounds of discussion (each player speaks once per round)
+kill_cooldown: 3          # Rounds impostor must wait between kills
+
+# Spatial settings
+enable_spatial: true      # Use spatial map and movement
+enable_vents: true        # Allow impostors to use vents
+
+# LLM Agent Settings
+agent:
+  model: "anthropic/claude-3.5-sonnet"
+  temperature: 0.8
+  memory_capacity: 35
+  
+# Emergency meetings
+emergency_meetings: 1      # Number of emergency meetings per player
+
+# Logging
+logging:
+  enabled: true
+  output_dir: "experiments/among_us"
+  log_private: false
+

@@ -40,13 +40,15 @@ class WerewolfEnv(BaseEnvironment):
             game_id: Optional game ID
             logger: Optional GameLogger instance
         """
-        self.config = config or WerewolfConfig()
-        super().__init__(agents, game_id, logger)
-        self.state: WerewolfState = WerewolfState()
+        config = config or WerewolfConfig()
+        self.game_config = config
+        self.logger = logger
+        super().__init__(agents, config=config.__dict__, game_id=game_id, seed=getattr(config, 'seed', None))
     
-    def _validate_num_players(self, num_players: int) -> bool:
+    def _validate_num_players(self):
         """Validate number of players."""
-        return 5 <= num_players <= 20
+        if not (5 <= self.num_players <= 20):
+            raise EnvironmentError(f"Werewolf requires 5-20 players, got {self.num_players}")
     
     def _get_current_player(self) -> Optional[int]:
         """Get the current player (for observation generation)."""
@@ -75,8 +77,11 @@ class WerewolfEnv(BaseEnvironment):
     
     def reset(self) -> Dict[int, Observation]:
         """Reset the game state."""
+        # Initialize state
+        self.state = WerewolfState()
+        
         # Assign roles
-        roles = assign_roles(self.config)
+        roles = assign_roles(self.game_config)
         
         # Create player states
         self.state.players = {}
@@ -102,11 +107,11 @@ class WerewolfEnv(BaseEnvironment):
         
         # Log game start
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 event_type=EventType.GAME_START,
                 data={
-                    "n_players": self.config.n_players,
-                    "n_werewolves": self.config.n_werewolves,
+                    "n_players": self.game_config.n_players,
+                    "n_werewolves": self.game_config.n_werewolves,
                     "roles": [r.value for r in roles],
                 }
             )
@@ -140,21 +145,27 @@ class WerewolfEnv(BaseEnvironment):
                     f"Your fellow werewolf(ves): {', '.join(other_wolves)}"
                 )
     
-    def step(self, action: Action) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
-        """Execute one step of the game."""
-        # Handle action based on phase
-        if self.state.phase == Phase.NIGHT_WEREWOLF:
-            self._handle_werewolf_action(action)
-        elif self.state.phase == Phase.NIGHT_DOCTOR:
-            self._handle_doctor_action(action)
-        elif self.state.phase == Phase.NIGHT_SEER:
-            self._handle_seer_action(action)
-        elif self.state.phase == Phase.DAY_BIDDING:
-            self._handle_bidding_action(action)
-        elif self.state.phase == Phase.DAY_DEBATE:
-            self._handle_debate_action(action)
-        elif self.state.phase == Phase.DAY_VOTING:
-            self._handle_voting_action(action)
+    def step(self, actions: Dict[int, Action]) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
+        """Execute one step of the game.
+        
+        Args:
+            actions: Dictionary mapping player_id to Action
+        """
+        # Process actions based on phase
+        # For night phases, typically only one actor; for day phases, multiple actors
+        for player_id, action in actions.items():
+            if self.state.phase == Phase.NIGHT_WEREWOLF:
+                self._handle_werewolf_action(action)
+            elif self.state.phase == Phase.NIGHT_DOCTOR:
+                self._handle_doctor_action(action)
+            elif self.state.phase == Phase.NIGHT_SEER:
+                self._handle_seer_action(action)
+            elif self.state.phase == Phase.DAY_BIDDING:
+                self._handle_bidding_action(action)
+            elif self.state.phase == Phase.DAY_DEBATE:
+                self._handle_debate_action(action)
+            elif self.state.phase == Phase.DAY_VOTING:
+                self._handle_voting_action(action)
         
         # Get observations
         observations = self._get_observations()
@@ -179,13 +190,13 @@ class WerewolfEnv(BaseEnvironment):
         target = action.data.get("target")
         
         if target is None:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": "No target specified"}
             )
             # Move to next phase anyway
-            self.state.phase = Phase.NIGHT_DOCTOR if self.config.include_doctor else (
-                Phase.NIGHT_SEER if self.config.include_seer else Phase.DAY_BIDDING
+            self.state.phase = Phase.NIGHT_DOCTOR if self.game_config.include_doctor else (
+                Phase.NIGHT_SEER if self.game_config.include_seer else Phase.DAY_BIDDING
             )
             return
         
@@ -194,7 +205,7 @@ class WerewolfEnv(BaseEnvironment):
         valid, error = validate_night_action("eliminate", target, alive, action.player_id)
         
         if not valid:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": error}
             )
@@ -205,8 +216,8 @@ class WerewolfEnv(BaseEnvironment):
         
         # Log action
         if self.logger:
-            self.logger.log_event(
-                EventType.NIGHT_ACTION,
+            self.logger.log(
+                EventType.PLAYER_ACTION,
                 {
                     "round": self.state.round_number,
                     "actor": action.player_id,
@@ -224,11 +235,11 @@ class WerewolfEnv(BaseEnvironment):
             )
         
         # Move to next phase
-        if self.config.include_doctor and self.state.is_player_alive(
+        if self.game_config.include_doctor and self.state.is_player_alive(
             self.state.get_player_by_role(Role.DOCTOR)
         ):
             self.state.phase = Phase.NIGHT_DOCTOR
-        elif self.config.include_seer and self.state.is_player_alive(
+        elif self.game_config.include_seer and self.state.is_player_alive(
             self.state.get_player_by_role(Role.SEER)
         ):
             self.state.phase = Phase.NIGHT_SEER
@@ -241,7 +252,7 @@ class WerewolfEnv(BaseEnvironment):
         
         if target is None:
             # Move to next phase
-            self.state.phase = Phase.NIGHT_SEER if self.config.include_seer else Phase.DAY_BIDDING
+            self.state.phase = Phase.NIGHT_SEER if self.game_config.include_seer else Phase.DAY_BIDDING
             self._resolve_night()
             return
         
@@ -250,7 +261,7 @@ class WerewolfEnv(BaseEnvironment):
         valid, error = validate_night_action("protect", target, alive, action.player_id)
         
         if not valid:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": error}
             )
@@ -261,8 +272,8 @@ class WerewolfEnv(BaseEnvironment):
         
         # Log action
         if self.logger:
-            self.logger.log_event(
-                EventType.NIGHT_ACTION,
+            self.logger.log(
+                EventType.PLAYER_ACTION,
                 {
                     "round": self.state.round_number,
                     "actor": action.player_id,
@@ -279,7 +290,7 @@ class WerewolfEnv(BaseEnvironment):
         )
         
         # Move to next phase
-        if self.config.include_seer and self.state.is_player_alive(
+        if self.game_config.include_seer and self.state.is_player_alive(
             self.state.get_player_by_role(Role.SEER)
         ):
             self.state.phase = Phase.NIGHT_SEER
@@ -300,7 +311,7 @@ class WerewolfEnv(BaseEnvironment):
         valid, error = validate_night_action("investigate", target, alive, action.player_id)
         
         if not valid:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": error}
             )
@@ -313,8 +324,8 @@ class WerewolfEnv(BaseEnvironment):
         
         # Log action
         if self.logger:
-            self.logger.log_event(
-                EventType.NIGHT_ACTION,
+            self.logger.log(
+                EventType.PLAYER_ACTION,
                 {
                     "round": self.state.round_number,
                     "actor": action.player_id,
@@ -339,6 +350,26 @@ class WerewolfEnv(BaseEnvironment):
         # Determine if anyone dies
         target = self.state.current_night.werewolf_target
         protected = self.state.current_night.doctor_target
+        investigated = self.state.current_night.seer_target
+        
+        # Log comprehensive night results
+        if self.logger:
+            night_log = {
+                "round": self.state.round_number,
+                "werewolf_target": target,
+                "werewolf_target_name": self.state.players[target].name if target is not None else None,
+                "doctor_target": protected,
+                "doctor_target_name": self.state.players[protected].name if protected is not None else None,
+                "seer_target": investigated,
+                "seer_target_name": self.state.players[investigated].name if investigated is not None else None,
+                "kill_successful": target is not None and target != protected,
+                "kill_blocked": target is not None and target == protected,
+            }
+            self.logger.log(
+                EventType.PHASE_CHANGE,
+                night_log,
+                is_private=False
+            )
         
         if target is not None and target != protected:
             # Player dies
@@ -353,7 +384,7 @@ class WerewolfEnv(BaseEnvironment):
             
             # Log death
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.PLAYER_ELIMINATED,
                     {
                         "round": self.state.round_number,
@@ -365,6 +396,12 @@ class WerewolfEnv(BaseEnvironment):
                 )
         elif target is not None and target == protected:
             # Protection saved the target
+            self.state.broadcast_observation(
+                "Moderator Announcement: No one was eliminated during the night. The Doctor's protection was successful!",
+                include_dead=False
+            )
+        else:
+            # No target (werewolves didn't act or skipped)
             self.state.broadcast_observation(
                 "Moderator Announcement: No one was eliminated during the night.",
                 include_dead=False
@@ -389,7 +426,7 @@ class WerewolfEnv(BaseEnvironment):
         # Validate bid
         valid, error = validate_bid(bid)
         if not valid:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": error}
             )
@@ -426,7 +463,7 @@ class WerewolfEnv(BaseEnvironment):
         statement = action.data.get("statement", "")
         
         if not statement:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": "Empty statement"}
             )
@@ -446,7 +483,7 @@ class WerewolfEnv(BaseEnvironment):
         
         # Log debate
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.DISCUSSION,
                 {
                     "round": self.state.round_number,
@@ -458,7 +495,7 @@ class WerewolfEnv(BaseEnvironment):
             )
         
         # Check if debate is complete
-        if len(self.state.current_day.debate) >= self.config.max_debate_turns:
+        if len(self.state.current_day.debate) >= self.game_config.max_debate_turns:
             # Move to voting
             self.state.phase = Phase.DAY_VOTING
             self.state.current_speaker = None
@@ -477,7 +514,7 @@ class WerewolfEnv(BaseEnvironment):
         target = action.data.get("target")
         
         if target is None:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": "No target specified"}
             )
@@ -488,7 +525,7 @@ class WerewolfEnv(BaseEnvironment):
         valid, error = validate_vote(action.player_id, target, alive)
         
         if not valid:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.ERROR,
                 {"player_id": action.player_id, "error": error}
             )
@@ -499,7 +536,7 @@ class WerewolfEnv(BaseEnvironment):
         
         # Log vote
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.VOTE_CAST,
                 {
                     "round": self.state.round_number,
@@ -515,7 +552,32 @@ class WerewolfEnv(BaseEnvironment):
     
     def _resolve_day_vote(self):
         """Resolve the day vote."""
-        eliminated, vote_count = get_vote_result(self.state.current_day.votes)
+        alive = self.state.get_alive_players()
+        eliminated, vote_count = get_vote_result(
+            self.state.current_day.votes,
+            n_alive=len(alive),
+            require_majority=self.game_config.vote_requires_majority
+        )
+        
+        # Log complete vote results
+        if self.logger:
+            # Count votes per target
+            vote_counts = {}
+            for voter, target in self.state.current_day.votes.items():
+                vote_counts[target] = vote_counts.get(target, 0) + 1
+            
+            self.logger.log(
+                EventType.ELECTION_RESULT,
+                {
+                    "round": self.state.round_number,
+                    "votes": self.state.current_day.votes,  # voter_id -> target_id
+                    "vote_counts": vote_counts,  # target_id -> count
+                    "eliminated": eliminated,
+                    "vote_count": vote_count,
+                    "tied": eliminated is None,
+                },
+                is_private=False
+            )
         
         if eliminated is not None:
             # Someone was eliminated
@@ -532,7 +594,7 @@ class WerewolfEnv(BaseEnvironment):
             
             # Log elimination
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.PLAYER_ELIMINATED,
                     {
                         "round": self.state.round_number,
@@ -544,9 +606,23 @@ class WerewolfEnv(BaseEnvironment):
                     }
                 )
         else:
-            # Tie - no elimination
+            # No elimination (tie or no majority)
+            # Determine reason from vote counts
+            vote_counts = {}
+            for voter, target in self.state.current_day.votes.items():
+                vote_counts[target] = vote_counts.get(target, 0) + 1
+            
+            if len(vote_counts) == 0:
+                reason = "No votes were cast."
+            elif len([k for k, v in vote_counts.items() if v == max(vote_counts.values())]) > 1:
+                reason = "The vote was tied."
+            elif self.game_config.vote_requires_majority:
+                reason = "No player received a majority of votes."
+            else:
+                reason = "The vote did not result in an elimination."
+            
             self.state.broadcast_observation(
-                "Moderator Announcement: The vote was tied. No one was eliminated.",
+                f"Moderator Announcement: {reason} No one was eliminated.",
                 include_dead=False
             )
         
@@ -563,7 +639,7 @@ class WerewolfEnv(BaseEnvironment):
         self.state.phase = Phase.NIGHT_WEREWOLF
         
         # Check round limit
-        if self.state.round_number > self.config.max_rounds:
+        if self.state.round_number > self.game_config.max_rounds:
             self.state.winner = None
             self.state.win_reason = "Maximum rounds reached (draw)"
             self.state.phase = Phase.GAME_END
@@ -581,7 +657,7 @@ class WerewolfEnv(BaseEnvironment):
             self.state.phase = Phase.GAME_END
             
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.GAME_END,
                     {
                         "winner": winner.value if winner else "draw",
@@ -637,13 +713,13 @@ class WerewolfEnv(BaseEnvironment):
             return "   (First round)"
         
         formatted = []
-        for day_result in self.state.day_results:
-            if day_result.eliminated is not None:
-                elim_name = self.state.players[day_result.eliminated].name
-                elim_role = self.state.players[day_result.eliminated].role.value
-                formatted.append(f"   • Round {day_result.round_num}: {elim_name} ({elim_role}) was eliminated")
+        for round_idx, day_result in enumerate(self.state.day_results, start=1):
+            if day_result.eliminated_player is not None:
+                elim_name = self.state.players[day_result.eliminated_player].name
+                elim_role = self.state.players[day_result.eliminated_player].role.value
+                formatted.append(f"   • Round {round_idx}: {elim_name} ({elim_role}) was eliminated")
             else:
-                formatted.append(f"   • Round {day_result.round_num}: No elimination")
+                formatted.append(f"   • Round {round_idx}: No elimination")
         return "\n".join(formatted) if formatted else "   (First round)"
     
     def _get_observations(self) -> Dict[int, Observation]:
@@ -665,6 +741,7 @@ class WerewolfEnv(BaseEnvironment):
             
             # Add phase-specific instructions
             instruction = ""
+            obs_type = "observe"  # Default to observe
             
             if not player.is_alive:
                 instruction = "You are dead. You can only observe."
@@ -675,6 +752,8 @@ class WerewolfEnv(BaseEnvironment):
                     werewolf_ids = self.state.get_alive_werewolves()
                     teammates = [self.state.players[wid].name for wid in werewolf_ids if wid != pid]
                     teammates_str = ", ".join(teammates) if teammates else "none (you are alone)"
+                    
+                    targets_list = [f"Player {p} ({self.state.players[p].name})" for p in alive if p not in werewolf_ids]
                     
                     instruction = f"""=== NIGHT {self.state.round_number} - WEREWOLF ACTION ===
 
@@ -687,9 +766,10 @@ YOUR TEAMMATES: {teammates_str}
 ⚡ ACTION REQUIRED:
 Choose a player to eliminate tonight.
 
-Available targets: {[self.state.players[p].name for p in alive if p not in werewolf_ids]}
+Available targets: {targets_list}
 
-Respond with JSON: {{"type": "eliminate", "target": <player_id>}}"""
+Respond with JSON using the numeric player_id: {{"type": "eliminate", "target": <player_id>}}
+Example: {{"type": "eliminate", "target": 0}}"""
                     obs_type = "act"
                 else:
                     instruction = "NIGHT PHASE: You are asleep."
@@ -697,6 +777,8 @@ Respond with JSON: {{"type": "eliminate", "target": <player_id>}}"""
             
             elif self.state.phase == Phase.NIGHT_DOCTOR:
                 if player.role == Role.DOCTOR:
+                    targets_list = [f"Player {p} ({self.state.players[p].name})" for p in alive]
+                    
                     instruction = f"""=== NIGHT {self.state.round_number} - DOCTOR ACTION ===
 
 YOUR ROLE: Doctor (Good Team)
@@ -707,11 +789,12 @@ YOUR ROLE: Doctor (Good Team)
 ⚡ ACTION REQUIRED:
 Choose a player to protect from Werewolf elimination tonight.
 
-Available targets: {[self.state.players[p].name for p in alive]}
+Available targets: {targets_list}
 
 Strategy: Protect suspected power roles (Seer) or vulnerable villagers.
 
-Respond with JSON: {{"type": "protect", "target": <player_id>}}"""
+Respond with JSON using the numeric player_id: {{"type": "protect", "target": <player_id>}}
+Example: {{"type": "protect", "target": 2}}"""
                     obs_type = "act"
                 else:
                     instruction = "NIGHT PHASE: You are asleep."
@@ -719,6 +802,8 @@ Respond with JSON: {{"type": "protect", "target": <player_id>}}"""
             
             elif self.state.phase == Phase.NIGHT_SEER:
                 if player.role == Role.SEER:
+                    targets_list = [f"Player {p} ({self.state.players[p].name})" for p in alive if p != pid]
+                    
                     instruction = f"""=== NIGHT {self.state.round_number} - SEER ACTION ===
 
 YOUR ROLE: Seer (Good Team) - You can investigate players to learn their role!
@@ -732,11 +817,12 @@ YOUR ROLE: Seer (Good Team) - You can investigate players to learn their role!
 ⚡ ACTION REQUIRED:
 Choose a player to investigate and learn if they are Werewolf or not.
 
-Available targets: {[self.state.players[p].name for p in alive if p != pid]}
+Available targets: {targets_list}
 
 Strategy: Investigate suspicious players or confirm trusted allies.
 
-Respond with JSON: {{"type": "investigate", "target": <player_id>}}"""
+Respond with JSON using the numeric player_id: {{"type": "investigate", "target": <player_id>}}
+Example: {{"type": "investigate", "target": 3}}"""
                     obs_type = "act"
                 else:
                     instruction = "NIGHT PHASE: You are asleep."
@@ -749,11 +835,18 @@ Respond with JSON: {{"type": "investigate", "target": <player_id>}}"""
                     instruction = "Waiting for others to bid."
                     obs_type = "observe"
                 else:
-                    turns_left = self.config.max_debate_turns - len(self.state.current_day.debate)
+                    turns_left = self.game_config.max_debate_turns - len(self.state.current_day.debate)
+                    
+                    # Include recent observations (like night kill announcements)
+                    recent_obs = ""
+                    if player.observations:
+                        last_3_obs = player.observations[-3:]  # Show last 3 observations
+                        recent_obs = "\n📰 RECENT EVENTS:\n" + "\n".join([f"   • {obs}" for obs in last_3_obs]) + "\n"
+                    
                     instruction = f"""=== DAY {self.state.round_number} - BIDDING TO SPEAK ===
 
 YOUR ROLE: {player.role.value} ({player.team.value} Team)
-
+{recent_obs}
 🔍 PREVIOUS ELIMINATIONS:
 {self._format_previous_rounds_summary()}
 
@@ -789,10 +882,16 @@ Respond with JSON: {{"type": "bid", "bid": <0-4>}}"""
                     elif player.role in [Role.DOCTOR, Role.VILLAGER]:
                         role_strategy = "\n👥 VILLAGER STRATEGY: Scrutinize accusations, expose inconsistencies, call out suspicious behavior. Work together to find Werewolves!"
                     
+                    # Include recent observations (like night kill announcements)
+                    recent_obs = ""
+                    if player.observations:
+                        last_3_obs = player.observations[-3:]  # Show last 3 observations
+                        recent_obs = "\n📰 RECENT EVENTS:\n" + "\n".join([f"   • {obs}" for obs in last_3_obs]) + "\n"
+                    
                     instruction = f"""=== DAY {self.state.round_number} - YOUR TURN TO SPEAK ===
 
 YOUR ROLE: {player.role.value} ({player.team.value} Team){role_strategy}
-
+{recent_obs}
 🔍 PREVIOUS ELIMINATIONS:
 {self._format_previous_rounds_summary()}
 
@@ -823,10 +922,25 @@ Respond with JSON: {{"type": "debate", "statement": "<your statement>"}}"""
                 else:
                     role_strategy = "\n👥 VILLAGER STRATEGY: Look for inconsistencies, deflection, discord-sowing, or unusually quiet players."
                 
+                targets_list = [f"Player {p} ({self.state.players[p].name})" for p in alive if p != pid]
+                
+                # Add majority requirement notice
+                majority_text = ""
+                if self.game_config.vote_requires_majority:
+                    from math import floor
+                    required = floor(len(alive) / 2) + 1
+                    majority_text = f"\n⚖️  MAJORITY REQUIRED: {required}/{len(alive)} votes needed to eliminate. If no majority, no elimination occurs."
+                
+                # Include recent observations (like night kill announcements)
+                recent_obs = ""
+                if player.observations:
+                    last_3_obs = player.observations[-3:]  # Show last 3 observations
+                    recent_obs = "\n📰 RECENT EVENTS:\n" + "\n".join([f"   • {obs}" for obs in last_3_obs]) + "\n"
+                
                 instruction = f"""=== DAY {self.state.round_number} - VOTING ===
 
 YOUR ROLE: {player.role.value} ({player.team.value} Team){role_strategy}
-
+{recent_obs}
 🔍 PREVIOUS ELIMINATIONS:
 {self._format_previous_rounds_summary()}
 
@@ -834,11 +948,12 @@ YOUR ROLE: {player.role.value} ({player.team.value} Team){role_strategy}
 {self._format_debate_history()}
 
 ⚡ ACTION REQUIRED:
-Vote to eliminate a player. Your vote is PRIVATE.
+Vote to eliminate a player. Your vote is PRIVATE.{majority_text}
 
-Available targets: {[self.state.players[p].name for p in alive if p != pid]}
+Available targets: {targets_list}
 
-Respond with JSON: {{"type": "vote", "target": <player_id>}}"""
+Respond with JSON using the numeric player_id: {{"type": "vote", "target": <player_id>}}
+Example: {{"type": "vote", "target": 1}}"""
                 obs_type = "act"
                 obs_data["current_debate"] = [
                     f"{self.state.players[speaker].name}: {stmt}"
@@ -854,6 +969,7 @@ Respond with JSON: {{"type": "vote", "target": <player_id>}}"""
                 obs_type = "observe"
             
             obs_data["instruction"] = instruction
+            obs_data["type"] = obs_type  # Add obs_type to data for script filtering
             
             observations[pid] = Observation(
                 player_id=pid,

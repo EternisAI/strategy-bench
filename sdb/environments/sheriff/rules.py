@@ -1,7 +1,8 @@
 """Sheriff of Nottingham game rules and utilities."""
 
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from collections import Counter
+from dataclasses import dataclass
 
 from .types import (
     CardDef,
@@ -14,6 +15,16 @@ from .types import (
     KING_BONUS,
     QUEEN_BONUS,
 )
+
+
+@dataclass
+class InspectionOutcome:
+    """Result of inspecting a merchant's bag."""
+    truthful: bool
+    confiscated: List[int]  # Card IDs confiscated to discard
+    delivered: List[int]  # Card IDs delivered to stand
+    sheriff_delta: int  # Gold change for sheriff (can be negative)
+    merchant_delta: int  # Gold change for merchant (can be negative)
 
 
 def build_deck(include_royal: bool = False, num_players: int = 4) -> List[CardDef]:
@@ -264,4 +275,101 @@ def get_next_merchant_idx(sheriff_idx: int, merchant_offset: int, num_players: i
         Player index of the merchant
     """
     return (sheriff_idx + 1 + merchant_offset) % num_players
+
+
+def validate_bag_and_declaration(
+    bag: List[int],
+    declared_type: Optional[LegalType],
+    declared_count: Optional[int],
+    bag_limit: int,
+) -> None:
+    """Validate that a bag and declaration meet game rules.
+    
+    Raises:
+        ValueError: If validation fails
+    """
+    if not bag:
+        raise ValueError("Bag must contain at least 1 card.")
+    if len(bag) > bag_limit:
+        raise ValueError(f"Bag exceeds limit of {bag_limit}.")
+    if declared_type is None:
+        raise ValueError("Declared type is required.")
+    if declared_count is None or declared_count <= 0:
+        raise ValueError("Declared count must be >= 1.")
+    if declared_count != len(bag):
+        raise ValueError(f"Declared count ({declared_count}) must equal the number of cards in the bag ({len(bag)}).")
+
+
+def is_bag_truthful(
+    bag: List[int],
+    declared_type: Optional[LegalType],
+    declared_count: Optional[int],
+    card_defs: List[CardDef],
+) -> bool:
+    """Check if a bag declaration is truthful.
+    
+    Args:
+        bag: List of card IDs in the bag
+        declared_type: The declared legal type
+        declared_count: The declared count
+        card_defs: List of all card definitions
+        
+    Returns:
+        True if the declaration is completely truthful
+    """
+    if declared_type is None or not bag or not declared_count or declared_count != len(bag):
+        return False
+    
+    for cid in bag:
+        c = card_defs[cid]
+        if c.kind != CardKind.LEGAL or c.name != declared_type.value:
+            return False
+    return True
+
+
+def compute_inspection_outcome(
+    bag: List[int],
+    declared_type: Optional[LegalType],
+    declared_count: Optional[int],
+    card_defs: List[CardDef],
+) -> InspectionOutcome:
+    """Compute the outcome of inspecting a merchant's bag.
+    
+    Args:
+        bag: List of card IDs in the bag
+        declared_type: The declared legal type
+        declared_count: The declared count
+        card_defs: List of all card definitions
+        
+    Returns:
+        InspectionOutcome with confiscations, deliveries, and gold deltas
+    """
+    truthful_flag = is_bag_truthful(bag, declared_type, declared_count, card_defs)
+    confiscated, delivered = [], []
+    sheriff_delta = 0
+    merchant_delta = 0
+
+    if truthful_flag:
+        # Sheriff pays penalties for each legal card to the merchant
+        for cid in bag:
+            p = card_defs[cid].penalty
+            sheriff_delta -= p
+            merchant_delta += p
+            delivered.append(cid)
+        return InspectionOutcome(truthful_flag, confiscated, delivered, sheriff_delta, merchant_delta)
+
+    # Not truthful → collect penalties for mismatched legal and contraband
+    for cid in bag:
+        c = card_defs[cid]
+        if c.kind == CardKind.LEGAL and c.name == declared_type.value:
+            # matching legal still delivered; no penalty
+            delivered.append(cid)
+        else:
+            # contraband or mismatched legal → confiscate & merchant pays penalty
+            confiscated.append(cid)
+            p = c.penalty
+            sheriff_delta += p
+            merchant_delta -= p
+
+    return InspectionOutcome(truthful_flag, confiscated, delivered, sheriff_delta, merchant_delta)
 

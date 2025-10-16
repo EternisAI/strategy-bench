@@ -115,14 +115,23 @@ def validate_kill(
     Returns:
         Tuple of (is_valid, error_message)
     """
-    if not can_kill:
-        return False, "Kill on cooldown"
+    if killer_id not in alive_players:
+        return False, "Killer not alive"
+    
+    if target_id is None:
+        return False, "INVALID_TARGET_ID"
+    
+    if not isinstance(target_id, int):
+        return False, f"INVALID_TARGET_TYPE_{type(target_id).__name__}"
     
     if target_id not in alive_players:
         return False, f"Target {target_id} is not alive"
     
     if target_id == killer_id:
         return False, "Cannot kill yourself"
+    
+    if not can_kill:
+        return False, "KILL_ON_COOLDOWN"
     
     return True, ""
 

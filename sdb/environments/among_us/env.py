@@ -53,14 +53,12 @@ class AmongUsEnv(BaseEnvironment):
             game_id: Optional game ID
             logger: Optional GameLogger instance
         """
-        self.config = config or AmongUsConfig()
-        super().__init__(agents, game_id, logger)
-        self.state: AmongUsState = AmongUsState()
+        config = config or AmongUsConfig()
+        self.game_config = config
         self.rng = random.Random()
-        
-        # Initialize spatial map
         self.ship_map = SpaceshipMap()
-        self.state.ship_map = self.ship_map
+        self.logger = logger
+        super().__init__(agents, config=config.__dict__, game_id=game_id, seed=getattr(config, 'seed', None))
         
         # Track actions for current task round
         self.pending_task_actions: Dict[int, Action] = {}
@@ -87,9 +85,10 @@ class AmongUsEnv(BaseEnvironment):
         player.assigned_tasks = assigned
         player.total_tasks = len(assigned)
     
-    def _validate_num_players(self, num_players: int) -> bool:
+    def _validate_num_players(self):
         """Validate number of players."""
-        return 4 <= num_players <= 15
+        if not (4 <= self.num_players <= 15):
+            raise EnvironmentError(f"Among Us requires 4-15 players, got {self.num_players}")
     
     def _get_current_player(self) -> Optional[int]:
         """Get the current acting player."""
@@ -123,11 +122,15 @@ class AmongUsEnv(BaseEnvironment):
     
     def reset(self) -> Dict[int, Observation]:
         """Reset the game state."""
+        # Initialize state
+        self.state = AmongUsState()
+        self.state.ship_map = self.ship_map
+        
         # Reset spatial map
         self.ship_map.reset()
         
         # Assign roles
-        roles = assign_roles(self.config, self.rng)
+        roles = assign_roles(self.game_config, self.rng)
         
         # Initialize player states
         self.state.players = {}
@@ -138,7 +141,7 @@ class AmongUsEnv(BaseEnvironment):
                 role=role,
                 is_alive=True,
                 tasks_completed=0,
-                total_tasks=self.config.tasks_per_player if role == PlayerRole.CREWMATE else 0,
+                total_tasks=self.game_config.tasks_per_player if role == PlayerRole.CREWMATE else 0,
                 has_called_emergency=False,
                 location="Cafeteria",  # Everyone starts in Cafeteria
             )
@@ -169,11 +172,11 @@ class AmongUsEnv(BaseEnvironment):
         
         # Log game start
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 event_type=EventType.GAME_START,
                 data={
-                    "n_players": self.config.n_players,
-                    "n_impostors": self.config.n_impostors,
+                    "n_players": self.game_config.n_players,
+                    "n_impostors": self.game_config.n_impostors,
                     "roles": [r.value for r in roles],
                 }
             )
@@ -228,172 +231,254 @@ class AmongUsEnv(BaseEnvironment):
             self._resolve_task_round()
     
     def _resolve_task_round(self):
-        """Resolve all task actions for this round."""
+        """Resolve all task actions for this round using TWO-PHASE resolution.
+        
+        Phase 1: Resolve kills based on pre-move positions
+        Phase 2: Apply movements, tasks, and reports
+        
+        This prevents order-dependent kill outcomes.
+        """
         result = TaskRoundResult()
         
-        # Process each action
+        # 0) Snapshot start-of-round state
+        pre_loc = {pid: p.location for pid, p in self.state.players.items()}
+        alive_start = set(self.state.get_alive_players())
+        
+        # 1) Partition actions by type (preserve arrival order)
+        moves, vents, kills, tasks, reports, emergencies = [], [], [], [], [], []
         for pid, action in self.pending_task_actions.items():
+            t = action.data.get("type", "")
+            if t == "move":
+                moves.append((pid, action))
+            elif t == "vent":
+                vents.append((pid, action))
+            elif t == "kill":
+                kills.append((pid, action))
+            elif t == "complete_task":
+                tasks.append((pid, action))
+            elif t == "report_body":
+                reports.append((pid, action))
+            elif t == "call_emergency":
+                emergencies.append((pid, action))
+        
+        # 2) Resolve KILLS using pre-move locations
+        newly_dead = set()
+        for pid, action in kills:
             player = self.state.players[pid]
-            action_type = action.data.get("type", "")
+            if not player.is_alive:
+                continue
             
-            # Handle movement (both roles)
-            if action_type == "move":
-                target_room = action.data.get("room", "")
-                if self.state.can_player_move_to(pid, target_room):
-                    old_location = player.location
-                    self.ship_map.move_player(pid, old_location, target_room)
-                    player.location = target_room
-                    
+            target = action.data.get("target")
+            # Coerce string numbers to int
+            if isinstance(target, str) and target.isdigit():
+                target = int(target)
+            
+            can_kill = self.state.can_impostor_kill(pid)
+            valid, error = validate_kill(pid, target, list(alive_start), can_kill)
+            
+            if not valid:
+                self.state.players[pid].last_error = error
+                if self.logger:
+                    self.logger.log(
+                        EventType.ERROR,
+                        {
+                            "player_id": pid,
+                            "error": error,
+                            "error_code": error.replace(" ", "_").upper() if error else "UNKNOWN",
+                            "target_provided": target,
+                            "target_type": type(target).__name__
+                        }
+                    )
+                continue
+            
+            # Same-room check vs pre-round positions
+            if pre_loc.get(pid) == pre_loc.get(target):
+                self.state.players[target].is_alive = False
+                # Keep body where kill occurred
+                self.state.players[target].location = pre_loc[pid]
+                self.state.impostor_kill_cooldowns[pid] = self.game_config.kill_cooldown
+                newly_dead.add(target)
+                result.kills.append((pid, target))
+                
+                if self.logger:
+                    self.logger.log(
+                        EventType.PLAYER_ACTION,
+                        {
+                            "round": self.state.round_number,
+                            "killer": pid,
+                            "victim": target,
+                            "action": "kill",
+                            "location": pre_loc[pid],
+                            "pre_move_kill": True
+                        },
+                        is_private=True
+                    )
+            else:
+                killer_room = pre_loc.get(pid, "unknown")
+                targ_room = pre_loc.get(target, "unknown")
+                error_msg = f"Target not in same room (killer in {killer_room}, target in {targ_room})"
+                self.state.players[pid].last_error = error_msg
+                if self.logger:
+                    self.logger.log(
+                        EventType.ERROR,
+                        {
+                            "player_id": pid,
+                            "error": error_msg,
+                            "error_code": "TARGET_DIFFERENT_ROOM",
+                            "killer_location": killer_room,
+                            "target_location": targ_room
+                        }
+                    )
+        
+        # 3) Resolve EMERGENCY (first valid one wins)
+        for pid, action in emergencies:
+            if pid in newly_dead or not self.state.players[pid].is_alive:
+                continue
+            player = self.state.players[pid]
+            ok, msg = validate_emergency_call(pid, player.has_called_emergency)
+            if ok:
+                player.has_called_emergency = True
+                result.emergency_called = pid
+                if self.logger:
+                    self.logger.log(
+                        EventType.PLAYER_ACTION,
+                        {
+                            "round": self.state.round_number,
+                            "player_id": pid,
+                            "action": "call_emergency"
+                        }
+                    )
+                break
+            else:
+                self.state.players[pid].last_error = msg
+                if self.logger:
+                    self.logger.log(EventType.ERROR, {"player_id": pid, "error": msg, "error_code": "EMERGENCY_UNAVAILABLE"})
+        
+        # Helper: Check if player is alive and not killed this round
+        def _alive(pid):
+            return self.state.players[pid].is_alive and pid not in newly_dead
+        
+        # 4) Resolve MOVES for survivors only
+        for pid, action in moves:
+            if not _alive(pid):
+                continue
+            player = self.state.players[pid]
+            dest = action.data.get("room", "")
+            if self.state.can_player_move_to(pid, dest):
+                old = player.location
+                self.ship_map.move_player(pid, old, dest)
+                player.location = dest
+                if self.logger:
+                    self.logger.log(
+                        EventType.PLAYER_ACTION,
+                        {
+                            "round": self.state.round_number,
+                            "player_id": pid,
+                            "action": "move",
+                            "from": old,
+                            "to": dest
+                        }
+                    )
+            else:
+                error_msg = f"Invalid move to {dest}"
+                self.state.players[pid].last_error = error_msg
+                if self.logger:
+                    self.logger.log(EventType.ERROR, {"player_id": pid, "error": error_msg, "error_code": "INVALID_MOVE"})
+        
+        # 5) Resolve VENTS for survivors only
+        for pid, action in vents:
+            if not _alive(pid):
+                continue
+            player = self.state.players[pid]
+            if player.role != PlayerRole.IMPOSTOR:
+                continue
+            dest = action.data.get("room", "")
+            vent_dests = self.ship_map.get_vent_destinations(player.location)
+            if dest in vent_dests:
+                old = player.location
+                self.ship_map.move_player(pid, old, dest)
+                player.location = dest
+                if self.logger:
+                    self.logger.log(
+                        EventType.PLAYER_ACTION,
+                        {
+                            "round": self.state.round_number,
+                            "player_id": pid,
+                            "action": "vent",
+                            "from": old,
+                            "to": dest
+                        },
+                        is_private=True
+                    )
+            else:
+                error_msg = f"Invalid vent to {dest}"
+                self.state.players[pid].last_error = error_msg
+                if self.logger:
+                    self.logger.log(EventType.ERROR, {"player_id": pid, "error": error_msg, "error_code": "INVALID_VENT"})
+        
+        # 6) Resolve TASKS for survivors only
+        for pid, action in tasks:
+            if not _alive(pid):
+                continue
+            player = self.state.players[pid]
+            if player.role != PlayerRole.CREWMATE:
+                continue
+            if player.tasks_completed < player.total_tasks:
+                task_name, task_room = player.assigned_tasks[player.tasks_completed]
+                if player.location == task_room:
+                    player.tasks_completed += 1
+                    result.tasks_completed.append(pid)
                     if self.logger:
-                        self.logger.log_event(
+                        self.logger.log(
                             EventType.PLAYER_ACTION,
                             {
                                 "round": self.state.round_number,
                                 "player_id": pid,
-                                "action": "move",
-                                "from": old_location,
-                                "to": target_room
+                                "action": "complete_task",
+                                "task": task_name,
+                                "room": task_room,
+                                "progress": f"{player.tasks_completed}/{player.total_tasks}"
                             }
                         )
-                elif self.logger:
-                    self.logger.log_event(
-                        EventType.ERROR,
-                        {
-                            "player_id": pid,
-                            "error": f"Invalid move to {target_room}"
-                        }
-                    )
-            
-            # Handle vent (impostors only)
-            elif action_type == "vent" and player.role == PlayerRole.IMPOSTOR:
-                target_room = action.data.get("room", "")
-                vent_dests = self.ship_map.get_vent_destinations(player.location)
-                if target_room in vent_dests:
-                    old_location = player.location
-                    self.ship_map.move_player(pid, old_location, target_room)
-                    player.location = target_room
-                    
+                else:
+                    error_msg = f"Cannot complete {task_name} - not in {task_room} (currently in {player.location})"
+                    self.state.players[pid].last_error = error_msg
                     if self.logger:
-                        self.logger.log_event(
-                            EventType.PLAYER_ACTION,
-                            {
-                                "round": self.state.round_number,
-                                "player_id": pid,
-                                "action": "vent",
-                                "from": old_location,
-                                "to": target_room
-                            },
-                            is_private=True  # Venting is secret
-                        )
-                elif self.logger:
-                    self.logger.log_event(
-                        EventType.ERROR,
-                        {
-                            "player_id": pid,
-                            "error": f"Invalid vent to {target_room}"
-                        }
-                    )
-            
-            if player.role == PlayerRole.CREWMATE:
-                if action_type == "complete_task":
-                    # Complete a task (must be in correct room)
-                    if player.tasks_completed < player.total_tasks:
-                        task_name, task_room = player.assigned_tasks[player.tasks_completed]
-                        
-                        # Check if player is in the correct room
-                        if player.location == task_room:
-                            player.tasks_completed += 1
-                            result.tasks_completed.append(pid)
-                            
-                            if self.logger:
-                                self.logger.log_event(
-                                    EventType.PLAYER_ACTION,
-                                    {
-                                        "round": self.state.round_number,
-                                        "player_id": pid,
-                                        "action": "complete_task",
-                                        "task": task_name,
-                                        "room": task_room,
-                                        "progress": f"{player.tasks_completed}/{player.total_tasks}"
-                                    }
-                                )
-                        elif self.logger:
-                            self.logger.log_event(
-                                EventType.ERROR,
-                                {
-                                    "player_id": pid,
-                                    "error": f"Cannot complete {task_name} - not in {task_room} (currently in {player.location})"
-                                }
-                            )
-                elif action_type == "call_emergency":
-                    # Call emergency meeting
-                    valid, error = validate_emergency_call(pid, player.has_called_emergency)
-                    if valid:
-                        player.has_called_emergency = True
-                        result.emergency_called = pid
-                        
-                        if self.logger:
-                            self.logger.log_event(
-                                EventType.PLAYER_ACTION,
-                                {
-                                    "round": self.state.round_number,
-                                    "player_id": pid,
-                                    "action": "call_emergency"
-                                }
-                            )
-            
-            elif player.role == PlayerRole.IMPOSTOR:
-                if action_type == "kill":
-                    # Attempt kill (must be in same room)
-                    target = action.data.get("target")
-                    can_kill = self.state.can_impostor_kill(pid)
-                    
-                    # Check if target is in the same room
-                    target_player = self.state.players.get(target)
-                    same_room = target_player and target_player.location == player.location
-                    
-                    valid, error = validate_kill(pid, target, alive := self.state.get_alive_players(), can_kill)
-                    
-                    if valid and same_room:
-                        # Kill successful
-                        self.state.players[target].is_alive = False
-                        # Keep body location for reporting
-                        self.state.players[target].location = player.location
-                        result.kills.append((pid, target))
-                        self.state.impostor_kill_cooldowns[pid] = self.config.kill_cooldown
-                        
-                        if self.logger:
-                            self.logger.log_event(
-                                EventType.PLAYER_ACTION,
-                                {
-                                    "round": self.state.round_number,
-                                    "killer": pid,
-                                    "victim": target,
-                                    "action": "kill",
-                                    "location": player.location
-                                },
-                                is_private=True
-                            )
-                    elif self.logger:
-                        if not same_room:
-                            error = f"Target not in same room (killer in {player.location}, target in {target_player.location if target_player else 'unknown'})"
-                        self.logger.log_event(
+                        self.logger.log(
                             EventType.ERROR,
-                            {"player_id": pid, "error": error}
+                            {
+                                "player_id": pid,
+                                "error": error_msg,
+                                "error_code": "WRONG_ROOM_FOR_TASK"
+                            }
                         )
-                elif action_type == "report_body":
-                    # Impostor can also report bodies
-                    victim = action.data.get("victim")
-                    if victim is not None and not self.state.players[victim].is_alive:
-                        result.body_reported = (pid, victim)
         
-        # Check for body reports from crewmates
-        for pid, action in self.pending_task_actions.items():
-            if action.data.get("type") == "report_body":
-                victim = action.data.get("victim")
-                if victim is not None and not self.state.players[victim].is_alive:
-                    result.body_reported = (pid, victim)
-                    break  # Only one report needed
+        # 7) Body reports (first valid reporter wins; don't overwrite)
+        for pid, action in reports:
+            if not _alive(pid):
+                continue
+            player = self.state.players[pid]
+            victim = action.data.get("victim")
+            if victim is not None and victim in self.state.players:
+                victim_player = self.state.players[victim]
+                # Only report bodies from kills, not ejections
+                if (not victim_player.is_alive 
+                    and victim_player.location != "EJECTED" 
+                    and victim_player.location == player.location):
+                    if result.body_reported is None:  # First reporter wins
+                        result.body_reported = (pid, victim)
+                        if self.logger:
+                            self.logger.log(
+                                EventType.PLAYER_ACTION,
+                                {
+                                    "round": self.state.round_number,
+                                    "player_id": pid,
+                                    "action": "report_body",
+                                    "victim": victim,
+                                    "location": player.location
+                                }
+                            )
+                    break
         
         # Store result
         self.state.task_round_results.append(result)
@@ -414,14 +499,14 @@ class AmongUsEnv(BaseEnvironment):
                 return
             
             # Check round limit
-            if self.state.round_number >= self.config.max_task_rounds:
+            if self.state.round_number >= self.game_config.max_task_rounds:
                 # Game ends in impostor victory (ran out of time)
                 self.state.winner = "impostors"
                 self.state.win_reason = "Time limit reached"
                 self.state.phase = Phase.GAME_END
                 
                 if self.logger:
-                    self.logger.log_event(
+                    self.logger.log(
                         EventType.GAME_END,
                         {
                             "winner": self.state.winner,
@@ -435,7 +520,7 @@ class AmongUsEnv(BaseEnvironment):
         if self.logger:
             if trigger.body_reported:
                 reporter, victim = trigger.body_reported
-                self.logger.log_event(
+                self.logger.log(
                     EventType.PHASE_CHANGE,
                     {
                         "from_phase": "task",
@@ -446,7 +531,7 @@ class AmongUsEnv(BaseEnvironment):
                     }
                 )
             elif trigger.emergency_called:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.PHASE_CHANGE,
                     {
                         "from_phase": "task",
@@ -459,6 +544,8 @@ class AmongUsEnv(BaseEnvironment):
         self.state.phase = Phase.DISCUSSION
         self.state.current_meeting_statements = []
         self.state.current_votes = {}
+        self.state.discussion_round = 0
+        self.state.players_spoken_this_round = set()
     
     def _handle_discussion_action(self, action: Action):
         """Handle discussion phase actions."""
@@ -468,27 +555,36 @@ class AmongUsEnv(BaseEnvironment):
             statement = action.data.get("statement", "")
             if statement:
                 self.state.current_meeting_statements.append((action.player_id, statement))
+                self.state.players_spoken_this_round.add(action.player_id)
                 
                 # Broadcast statement
                 player_name = self.state.players[action.player_id].name
                 if self.logger:
-                    self.logger.log_event(
+                    self.logger.log(
                         EventType.DISCUSSION,
                         {
                             "round": self.state.round_number,
                             "player_id": action.player_id,
                             "player_name": player_name,
-                            "statement": statement
+                            "statement": statement,
+                            "discussion_round": self.state.discussion_round
                         },
                         is_private=False
                     )
+                
+                # Check if all alive players have spoken this round
+                alive_players = set(self.state.get_alive_players())
+                if self.state.players_spoken_this_round >= alive_players:
+                    # Round complete, advance to next round
+                    self.state.discussion_round += 1
+                    self.state.players_spoken_this_round = set()
+                    
+                    # Check if we've completed all discussion rounds
+                    if self.state.discussion_round >= self.game_config.discussion_rounds:
+                        self.state.phase = Phase.VOTING
         
         elif action_type == "vote_now":
             # Move to voting
-            self.state.phase = Phase.VOTING
-        
-        # Check discussion limit
-        if len(self.state.current_meeting_statements) >= self.config.discussion_rounds:
             self.state.phase = Phase.VOTING
     
     def _handle_voting_action(self, action: Action):
@@ -501,7 +597,7 @@ class AmongUsEnv(BaseEnvironment):
         
         if not valid:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": error}
                 )
@@ -512,7 +608,7 @@ class AmongUsEnv(BaseEnvironment):
         
         # Log vote
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.VOTE_CAST,
                 {
                     "round": self.state.round_number,
@@ -541,8 +637,8 @@ class AmongUsEnv(BaseEnvironment):
         
         # Log result
         if self.logger:
-            self.logger.log_event(
-                EventType.VOTE_RESULT,
+            self.logger.log(
+                EventType.ELECTION_RESULT,
                 {
                     "ejected": ejected,
                     "skipped": is_skip,
@@ -553,16 +649,23 @@ class AmongUsEnv(BaseEnvironment):
         # Eject player if not skipped/tied
         if ejected is not None:
             self.state.players[ejected].is_alive = False
+            # Remove ejected player from map (no body to report)
+            old_location = self.state.players[ejected].location
+            # Remove from the room's player set
+            if old_location in self.ship_map.rooms:
+                self.ship_map.rooms[old_location].remove_player(ejected)
+            self.state.players[ejected].location = "EJECTED"  # Mark as ejected, not killed
             
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.PLAYER_ELIMINATED,
                     {
                         "round": self.state.round_number,
                         "player_id": ejected,
                         "player_name": self.state.players[ejected].name,
                         "role": self.state.players[ejected].role.value,
-                        "by": "vote"
+                        "by": "vote",
+                        "ejected_from": old_location
                     }
                 )
         
@@ -595,7 +698,7 @@ class AmongUsEnv(BaseEnvironment):
             self.state.phase = Phase.GAME_END
             
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.GAME_END,
                     {
                         "winner": winner,
@@ -616,15 +719,16 @@ class AmongUsEnv(BaseEnvironment):
         Returns:
             Formatted string of eliminations
         """
-        if not self.state.eliminated_players:
+        eliminated = [pid for pid, p in self.state.players.items() if not p.is_alive]
+        
+        if not eliminated:
             return "   (No eliminations yet)"
         
         formatted = []
-        for pid, info in self.state.eliminated_players.items():
-            reason = info.get('reason', 'unknown')
-            round_num = info.get('round', '?')
+        for pid in eliminated:
+            player = self.state.players[pid]
             formatted.append(
-                f"   • Round {round_num}: Player {pid} eliminated ({reason})"
+                f"   • Player {pid} ({player.role.value}) - eliminated"
             )
         return "\n".join(formatted)
     
@@ -668,6 +772,22 @@ class AmongUsEnv(BaseEnvironment):
                 "task_completion": self.state.get_total_task_completion(),
             }
             
+            # Add player directory (lossless ID ↔ name mapping)
+            obs_data["player_directory"] = [
+                {
+                    "id": p_id,
+                    "name": p.name,
+                    "alive": p.is_alive
+                }
+                for p_id, p in self.state.players.items()
+            ]
+            
+            # Add error feedback
+            obs_data["last_error"] = player.last_error
+            
+            # Add round progress
+            obs_data["rounds_left"] = self.game_config.max_task_rounds - self.state.round_number
+            
             # Add spatial information
             current_location = player.location
             obs_data["location"] = current_location
@@ -697,6 +817,7 @@ class AmongUsEnv(BaseEnvironment):
                     if imp_id != pid
                 ]
                 obs_data["can_kill"] = self.state.can_impostor_kill(pid)
+                obs_data["kill_cooldown"] = self.state.impostor_kill_cooldowns.get(pid, 0)
                 # Impostors can see vent connections
                 obs_data["vent_destinations"] = self.ship_map.get_vent_destinations(current_location)
             
@@ -715,81 +836,158 @@ class AmongUsEnv(BaseEnvironment):
             elif self.state.phase == Phase.TASK:
                 if player.role == PlayerRole.CREWMATE:
                     actions = []
+                    action_choices = []
                     
                     # Movement
                     adj_rooms = obs_data["adjacent_rooms"]
                     if adj_rooms:
                         actions.append(f"{{\"type\": \"move\", \"room\": \"<room_name>\"}} (adjacent: {', '.join(adj_rooms)})")
+                        for room in adj_rooms:
+                            action_choices.append({
+                                "id": f"move:{room}",
+                                "type": "move",
+                                "payload": {"type": "move", "room": room}
+                            })
                     
                     # Task completion (only if in correct room)
                     if player.tasks_completed < player.total_tasks:
                         next_task_name, next_task_room = player.assigned_tasks[player.tasks_completed]
                         if next_task_room == current_location:
                             actions.append(f"{{\"type\": \"complete_task\"}} (complete {next_task_name} here)")
+                            action_choices.append({
+                                "id": "complete_task",
+                                "type": "complete_task",
+                                "payload": {"type": "complete_task"}
+                            })
                         else:
                             actions.append(f"(Next task: {next_task_name} in {next_task_room})")
                     
                     # Emergency button (only in Cafeteria)
                     if not player.has_called_emergency and current_location == "Cafeteria":
                         actions.append("{\"type\": \"call_emergency\"}")
+                        action_choices.append({
+                            "id": "call_emergency",
+                            "type": "call_emergency",
+                            "payload": {"type": "call_emergency"}
+                        })
                     
-                    # Body reporting (only if body in same room)
+                    # Body reporting (only if body in same room, exclude ejected players)
                     for body_pid, body_player in self.state.players.items():
-                        if not body_player.is_alive and body_player.location == current_location:
+                        if (not body_player.is_alive 
+                            and body_player.location == current_location 
+                            and body_player.location != "EJECTED"):
                             actions.append(f"{{\"type\": \"report_body\", \"victim\": {body_pid}}} (report {body_player.name}'s body)")
+                            action_choices.append({
+                                "id": f"report_body:{body_pid}",
+                                "type": "report_body",
+                                "payload": {"type": "report_body", "victim": body_pid}
+                            })
                     
-                    instruction = f"TASK PHASE (Location: {current_location}): Choose an action. Options:\n" + "\n".join(f"- {a}" for a in actions)
+                    obs_data["action_choices"] = action_choices
+                    instruction = f"TASK PHASE (Location: {current_location}): You MUST choose one from action_choices. Options:\n" + "\n".join(f"- {a}" for a in actions)
                     obs_type = "act"
                 else:  # Impostor
                     actions = []
+                    action_choices = []
                     
                     # Movement (corridors)
                     adj_rooms = obs_data["adjacent_rooms"]
                     if adj_rooms:
                         actions.append(f"{{\"type\": \"move\", \"room\": \"<room_name>\"}} (adjacent: {', '.join(adj_rooms)})")
+                        for room in adj_rooms:
+                            action_choices.append({
+                                "id": f"move:{room}",
+                                "type": "move",
+                                "payload": {"type": "move", "room": room}
+                            })
                     
                     # Vent travel (impostors only)
                     vent_dests = obs_data.get("vent_destinations", [])
                     if vent_dests:
                         actions.append(f"{{\"type\": \"vent\", \"room\": \"<room_name>\"}} (vent to: {', '.join(vent_dests)})")
+                        for room in vent_dests:
+                            action_choices.append({
+                                "id": f"vent:{room}",
+                                "type": "vent",
+                                "payload": {"type": "vent", "room": room}
+                            })
                     
                     # Kill (only if can kill and targets in same room)
                     if self.state.can_impostor_kill(pid):
                         targets_here = [vpid for vpid in visible_players if vpid != pid]
                         if targets_here:
-                            target_names = [self.state.players[t].name for t in targets_here]
-                            actions.append(f"{{\"type\": \"kill\", \"target\": <player_id>}} (targets here: {', '.join(target_names)})")
+                            target_list = [f"Player {t} ({self.state.players[t].name})" for t in targets_here]
+                            actions.append(f"{{\"type\": \"kill\", \"target\": <player_id>}} (targets: {', '.join(target_list)})")
+                            for t in targets_here:
+                                action_choices.append({
+                                    "id": f"kill:{t}",
+                                    "type": "kill",
+                                    "payload": {"type": "kill", "target": t}
+                                })
                         else:
                             actions.append("(No targets in this room)")
                     else:
                         actions.append(f"(Kill on cooldown: {self.state.impostor_kill_cooldowns[pid]} rounds)")
                     
-                    # Body reporting
+                    # Body reporting (exclude ejected players)
                     for body_pid, body_player in self.state.players.items():
-                        if not body_player.is_alive and body_player.location == current_location and body_pid != pid:
+                        if (not body_player.is_alive 
+                            and body_player.location == current_location 
+                            and body_player.location != "EJECTED" 
+                            and body_pid != pid):
                             actions.append(f"{{\"type\": \"report_body\", \"victim\": {body_pid}}} (report {body_player.name}'s body)")
+                            action_choices.append({
+                                "id": f"report_body:{body_pid}",
+                                "type": "report_body",
+                                "payload": {"type": "report_body", "victim": body_pid}
+                            })
                     
-                    instruction = f"TASK PHASE (Location: {current_location}): Choose an action. Options:\n" + "\n".join(f"- {a}" for a in actions)
+                    obs_data["action_choices"] = action_choices
+                    instruction = f"TASK PHASE (Location: {current_location}): You MUST choose one from action_choices. Options:\n" + "\n".join(f"- {a}" for a in actions)
                     obs_type = "act"
             
             elif self.state.phase == Phase.DISCUSSION:
-                instruction = (
-                    "DISCUSSION PHASE: Make a statement OR move to voting. "
-                    "Respond with JSON: {\"type\": \"discuss\", \"statement\": \"<your statement>\"} "
-                    "OR {\"type\": \"vote_now\"}"
-                )
-                obs_type = "act"
+                # Check if player has spoken this round
+                has_spoken_this_round = pid in self.state.players_spoken_this_round
+                
+                if has_spoken_this_round:
+                    instruction = f"DISCUSSION PHASE: Waiting for other players (Discussion Round {self.state.discussion_round + 1}/{self.game_config.discussion_rounds})"
+                    obs_type = "observe"
+                else:
+                    instruction = (
+                        f"DISCUSSION PHASE (Round {self.state.discussion_round + 1}/{self.game_config.discussion_rounds}): "
+                        f"Make ONE statement about what you saw, who you suspect, or your alibi. "
+                        f"Respond with JSON: {{\"type\": \"discuss\", \"statement\": \"<your statement>\"}}"
+                    )
+                    obs_type = "act"
+                
                 obs_data["discussion"] = [
                     f"{self.state.players[speaker].name}: {stmt}"
                     for speaker, stmt in self.state.current_meeting_statements
                 ]
+                obs_data["discussion_round"] = self.state.discussion_round
+                obs_data["has_spoken_this_round"] = has_spoken_this_round
             
             elif self.state.phase == Phase.VOTING:
                 if pid not in self.state.current_votes:
+                    # Build list of alive players for voting
+                    alive_players = [
+                        p_id for p_id in self.state.players
+                        if self.state.players[p_id].is_alive and p_id != pid
+                    ]
+                    player_list = ", ".join([
+                        f"Player {p_id} ({self.state.players[p_id].name})"
+                        for p_id in alive_players
+                    ])
+                    
                     instruction = (
-                        "VOTING PHASE: Vote to eject a player or skip. "
-                        "Respond with JSON: {\"type\": \"vote\", \"target\": <player_id>} "
-                        "OR {\"type\": \"vote\", \"target\": null} to skip"
+                        f"VOTING PHASE: Vote to eject someone or skip.\n"
+                        f"Alive players: {player_list}\n"
+                        f"Based on the discussion, who do you think is the impostor?\n"
+                        f"Respond with JSON:\n"
+                        f"  {{\"type\": \"vote\", \"target\": <player_id>}} to vote for that player\n"
+                        f"  {{\"type\": \"vote\", \"target\": null}} to skip/abstain\n"
+                        f"Use numeric player IDs (e.g., 0, 2, 3), NOT names."
                     )
                     obs_type = "act"
                 else:

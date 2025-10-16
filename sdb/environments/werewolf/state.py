@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from sdb.core.base_state import BaseState
+# from sdb.core.base_state import BaseState  # Not needed - using plain dataclass
 from sdb.environments.werewolf.types import (
     DayResult,
     NightResult,
@@ -15,7 +15,7 @@ from sdb.environments.werewolf.types import (
 
 
 @dataclass
-class WerewolfState(BaseState):
+class WerewolfState:
     """Complete state of a Werewolf game.
     
     Attributes:

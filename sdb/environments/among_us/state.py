@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, TYPE_CHECKING
 
-from sdb.core.base_state import BaseState
+# from sdb.core.base_state import BaseState  # Not needed - using plain dataclass
 from sdb.environments.among_us.types import (
     MeetingResult,
     Phase,
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class AmongUsState(BaseState):
+class AmongUsState:
     """Complete state of an Among Us game.
     
     Attributes:
@@ -47,6 +47,8 @@ class AmongUsState(BaseState):
     # Current meeting
     current_meeting_statements: List[tuple[int, str]] = field(default_factory=list)
     current_votes: Dict[int, int] = field(default_factory=dict)
+    discussion_round: int = 0  # Current discussion round number
+    players_spoken_this_round: set = field(default_factory=set)  # Players who spoke this round
     
     # Game outcome
     winner: Optional[str] = None

@@ -52,6 +52,7 @@ class SheriffState:
     # Negotiation state
     offers: Dict[int, Offer] = field(default_factory=dict)
     negotiation_round: int = 0
+    sheriff_responses: set = field(default_factory=set)  # Track which merchants sheriff has responded to
     
     # Inspection state
     inspected_merchants: set = field(default_factory=set)

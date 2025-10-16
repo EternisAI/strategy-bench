@@ -1,0 +1,31 @@
+# Werewolf Game Configuration
+
+game: werewolf
+
+# Number of players (5-20)
+n_players: 6
+
+# Role distribution
+n_werewolves: 2           # Number of werewolves
+
+# Special roles
+include_seer: true        # Seer can investigate one player per night
+include_doctor: true      # Doctor can protect one player per night
+
+# Game mechanics
+debate_turns: 10          # Maximum debate statements per day (maps to max_debate_turns)
+max_rounds: 20            # Maximum number of day/night cycles
+vote_requires_majority: true   # Require >50% votes to eliminate (prevents plurality wins)
+
+# LLM Agent Settings
+agent:
+  model: "openai/gpt-4o-mini"
+  temperature: 0.8
+  memory_capacity: 40
+  
+# Logging
+logging:
+  enabled: true
+  output_dir: "experiments/werewolf"
+  log_private: false
+

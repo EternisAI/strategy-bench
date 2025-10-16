@@ -100,7 +100,7 @@ class SheriffEnv(BaseEnvironment):
         
         # Log game start
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.GAME_START,
                 {
                     "n_players": self.game_config.n_players,
@@ -227,6 +227,10 @@ class SheriffEnv(BaseEnvironment):
                     }
             data["offers"] = offers_info
             
+            # Generate phase-specific instructions
+            instruction = self._generate_instruction(p.pid, st, data)
+            data["instruction"] = instruction
+            
             obs[p.pid] = Observation(
                 player_id=p.pid,
                 obs_type=ObservationType.PRIVATE,
@@ -236,6 +240,205 @@ class SheriffEnv(BaseEnvironment):
         
         return obs
 
+    def _generate_instruction(self, pid: int, state: SheriffState, data: Dict[str, Any]) -> str:
+        """Generate phase-specific instruction for a player."""
+        is_sheriff = (pid == state.sheriff_idx)
+        is_active = (pid == state.round_step)
+        
+        if state.phase == Phase.MARKET:
+            if is_active:
+                hand_with_ids = self._format_card_list_with_ids(data['hand'], data['hand_ids'])
+                return f"""=== MARKET PHASE - YOUR TURN ===
+
+You are a MERCHANT this round (Player {state.sheriff_idx} is Sheriff).
+
+YOUR HAND: {len(data['hand_ids'])} cards
+{hand_with_ids}
+
+YOUR GOLD: {data['gold']}
+
+AVAILABLE DISCARDS:
+- Left pile: {data['top_discard']['left']}
+- Right pile: {data['top_discard']['right']}
+- Draw from deck (deck has {data['deck_size']} cards)
+
+⚡ ACTION REQUIRED:
+First, you may discard cards from your hand (optional).
+Then, draw cards to replenish. Choose ONE:
+1. Take cards from left discard pile
+2. Take cards from right discard pile  
+3. Draw from deck
+
+Respond with JSON: {{"type": "draw", "source": "left"|"right"|"deck", "count": <1-5>, "discard_ids": [<optional card IDs to discard>]}}
+Example: {{"type": "draw", "source": "deck", "count": 2, "discard_ids": []}}"""
+            else:
+                return "Waiting for other merchants to draw cards from the market."
+                
+        elif state.phase == Phase.LOAD:
+            if is_active:
+                # Format hand with card IDs
+                hand_with_ids = self._format_card_list_with_ids(data['hand'], data['hand_ids'])
+                return f"""=== LOAD BAG PHASE - YOUR TURN ===
+
+You are a MERCHANT preparing your bag for inspection.
+
+YOUR HAND ({len(data['hand_ids'])} cards):
+{hand_with_ids}
+
+YOUR GOLD: {data['gold']}
+
+⚡ ACTION REQUIRED:
+**IMPORTANT**: You MUST place **1-{state.config.bag_limit} cards** into your bag.
+Use the card IDs shown above (the numbers in brackets: [ID:XX]).
+
+**EMPTY BAGS ARE NOT ALLOWED** - you will be rejected at declaration!
+
+You can put:
+- Legal goods ONLY (you'll declare honestly - safe but lower profit)
+- Contraband (you'll lie about them - more valuable but risky!)
+- Mix of both (partial lie - balanced strategy)
+
+Strategy tip: More contraband = more profit but higher risk if inspected!
+
+Respond with JSON: {{"type": "load", "card_ids": [<1-{state.config.bag_limit} card IDs from above>]}}
+Example if your hand IDs are [45, 23, 89, 12]: {{"type": "load", "card_ids": [45, 89, 12]}}"""
+            else:
+                return "Waiting for other merchants to load their bags."
+                
+        elif state.phase == Phase.DECLARE:
+            if is_active:
+                bag_cards = data['bag']
+                bag_ids = data['bag_ids']
+                bag_display = self._format_card_list_with_ids(bag_cards, bag_ids) if bag_cards else "  (empty bag - ERROR!)"
+                return f"""=== DECLARATION PHASE - YOUR TURN ===
+
+Your bag contains {len(bag_cards)} cards:
+{bag_display}
+
+YOUR GOLD: {data['gold']}
+
+⚡ ACTION REQUIRED:
+Declare what type of goods are in your bag.
+
+**CRITICAL RULES**:
+1. Your `declared_count` MUST equal the number of cards in your bag ({len(bag_cards)})
+2. You MUST declare exactly ONE legal good type: apples, cheese, bread, or chicken
+3. Empty bags are INVALID and will be rejected
+
+STRATEGY:
+- Be HONEST if you have only legal goods of one type (no penalty if inspected)
+- LIE if you have contraband or mixed goods (claim they're all one legal type - risky!)
+
+Respond with JSON: {{"type": "declare", "declared_type": "<apples|cheese|bread|chicken>", "declared_count": {len(bag_cards)}}}
+Example if bag has 3 cards: {{"type": "declare", "declared_type": "apples", "declared_count": 3}}"""
+            else:
+                return "Waiting for other merchants to declare their goods."
+                
+        elif state.phase == Phase.NEGOTIATE:
+            if is_sheriff:
+                # Show which merchants still need responses
+                merchants = state.get_all_merchants()
+                pending = [m for m in merchants if m not in state.sheriff_responses]
+                responded = [m for m in merchants if m in state.sheriff_responses]
+                
+                merchant_offers = []
+                for mpid in merchants:
+                    if mpid in data['offers']:
+                        offer_data = data['offers'][mpid]
+                        status = "✓ Responded" if mpid in responded else "⏳ Pending"
+                        merchant_offers.append(f"  • Player {mpid}: {offer_data['gold']} gold ({status})")
+                offers_text = "\n".join(merchant_offers) if merchant_offers else "  (No offers yet)"
+                
+                if pending:
+                    next_merchant = pending[0]
+                    action_text = f"""⚡ ACTION REQUIRED:
+Respond to Player {next_merchant}'s offer.
+
+Respond with JSON: {{"type": "respond", "merchant": {next_merchant}, "decision": "accept"|"reject"}}
+Example: {{"type": "respond", "merchant": {next_merchant}, "decision": "reject"}}
+
+Strategy: Accepting bribes gives you gold but lets contraband through!"""
+                else:
+                    action_text = "✅ All offers responded to. System will advance to next phase..."
+                
+                return f"""=== NEGOTIATION ROUND {state.negotiation_round}/{state.config.max_negotiation_rounds} - SHERIFF'S TURN ===
+
+You are the SHERIFF. Merchants have made their offers.
+
+OFFERS RECEIVED:
+{offers_text}
+
+{action_text}"""
+            else:
+                return f"""=== NEGOTIATION ROUND {state.negotiation_round}/{state.config.max_negotiation_rounds} - YOUR TURN ===
+
+You are a MERCHANT. Make an offer to bribe the Sheriff!
+
+YOUR BAG: {len(data['bag'])} cards declared as {data['declared_type']} x{data['declared_count']}
+YOUR GOLD: {data['gold']}
+
+⚡ ACTION REQUIRED:
+Offer a bribe to the Sheriff. Higher bribes = less likely to be inspected!
+If your bag is honest, you can offer little or nothing.
+If you're smuggling contraband, consider offering more!
+
+Respond with JSON: {{"type": "offer", "gold": <amount>, "promises": [<optional promises>]}}
+Example: {{"type": "offer", "gold": 5, "promises": ["I have only apples"]}}
+Or no bribe: {{"type": "offer", "gold": 0, "promises": []}}"""
+                
+        elif state.phase == Phase.INSPECT:
+            if is_sheriff:
+                merchants_info = []
+                for other in data['other_players']:
+                    decl = f"{other['declared_type']} x{other['declared_count']}" if other['declared_type'] else "nothing"
+                    merchants_info.append(f"  • Player {other['player_id']}: declared {decl}, bag size {other['bag_size']}")
+                merchants_text = "\n".join(merchants_info)
+                
+                return f"""=== INSPECTION PHASE - SHERIFF'S TURN ===
+
+You are the SHERIFF. Decide who to inspect!
+
+MERCHANTS THIS ROUND:
+{merchants_text}
+
+YOUR GOLD: {data['gold']}
+
+⚡ ACTION REQUIRED:
+Choose for each merchant:
+1. INSPECT: Open their bag. If they lied, they pay penalties. If honest, YOU pay!
+2. PASS: Let them through without inspection
+
+To inspect: {{"type": "inspect", "merchant": <player_id>, "choice": "inspect"}}
+To pass: {{"type": "inspect", "merchant": <player_id>, "choice": "pass"}}
+When done: {{"type": "resolve"}}
+
+Strategy: Inspect suspicious players (big bribes, unusual declarations)!"""
+            else:
+                return "Waiting for Sheriff to inspect merchants."
+                
+        elif state.phase == Phase.RESOLVE:
+            return "Round is being resolved..."
+        
+        return "Waiting..."
+    
+    def _format_card_list(self, cards: List[Dict[str, Any]]) -> str:
+        """Format a list of cards for display."""
+        if not cards:
+            return "  (no cards)"
+        lines = []
+        for i, card in enumerate(cards, 1):
+            lines.append(f"  {i}. {card['name']} ({card['kind']}) - Value: {card['value']}")
+        return "\n".join(lines)
+    
+    def _format_card_list_with_ids(self, cards: List[Dict[str, Any]], card_ids: List[int]) -> str:
+        """Format a list of cards with their IDs for display."""
+        if not cards:
+            return "  (no cards)"
+        lines = []
+        for i, (card, cid) in enumerate(zip(cards, card_ids), 1):
+            lines.append(f"  {i}. [ID:{cid}] {card['name']} ({card['kind']}) - Value: {card['value']}, Penalty: {card['penalty']}")
+        return "\n".join(lines)
+    
     def _format_cards(self, cards: List[CardDef]) -> List[Dict[str, Any]]:
         """Format card definitions for observation."""
         return [
@@ -258,15 +461,22 @@ class SheriffEnv(BaseEnvironment):
         """Execute actions and advance game state."""
         st = self.state
         
-        # Get active player
-        if st.phase in (Phase.INSPECT, Phase.RESOLVE):
+        # Handle RESOLVE phase (system phase, no player actions needed)
+        if st.phase == Phase.RESOLVE:
+            rewards = self._handle_resolve()
+            obs = self._get_observations()
+            done = st.game_over
+            return obs, rewards, done, {}
+        
+        # Get active player for other phases
+        if st.phase == Phase.INSPECT:
             active_pid = st.sheriff_idx
         else:
             active_pid = st.round_step
         
         # Execute action
         if active_pid not in actions:
-            raise ValueError(f"Active player {active_pid} must provide an action")
+            raise ValueError(f"Active player {active_pid} must provide an action in phase {st.phase.value}")
         
         action = actions[active_pid]
         
@@ -281,11 +491,6 @@ class SheriffEnv(BaseEnvironment):
             self._handle_negotiate(active_pid, action)
         elif st.phase == Phase.INSPECT:
             self._handle_inspect(active_pid, action)
-        elif st.phase == Phase.RESOLVE:
-            rewards = self._handle_resolve()
-            obs = self._get_observations()
-            done = st.game_over
-            return obs, rewards, done, {}
         
         # Get observations
         obs = self._get_observations()
@@ -323,8 +528,12 @@ class SheriffEnv(BaseEnvironment):
                     st.discard_left.append(cid)
         
         # Draw cards
-        draw_from = action_data.get("draw_from", [])
-        while len(p.hand) < st.config.hand_size:
+        # Support both "source" (string) and "draw_from" (list) for compatibility
+        source = action_data.get("source", "deck")
+        count = action_data.get("count", 1)
+        draw_from = action_data.get("draw_from", [source] * count)
+        
+        while len(p.hand) < st.config.hand_size and draw_from:
             src = draw_from.pop(0) if draw_from else "deck"
             
             if src == "left" and st.discard_left:
@@ -340,17 +549,17 @@ class SheriffEnv(BaseEnvironment):
                 else:
                     break  # No cards left
         
-        # Log
+        # Log (public summary)
         if self.logger:
-            self.logger.log_event(
-                EventType.ACTION,
+            self.logger.log(
+                EventType.PLAYER_ACTION,
                 {
                     "player_id": pid,
                     "phase": "market",
-                    "discarded": len(discard_ids),
-                    "hand_size": len(p.hand),
+                    "drew_cards": st.config.hand_size - (len(p.hand) - len(discard_ids)),
+                    "final_hand_size": len(p.hand),
                 },
-                is_private=True,
+                is_private=False,
             )
         
         self._advance_market()
@@ -372,7 +581,7 @@ class SheriffEnv(BaseEnvironment):
             st.round_step = get_next_merchant_idx(st.sheriff_idx, 0, st.config.n_players)
             
             if self.logger:
-                self.logger.log_event(EventType.PHASE_CHANGE, {"new_phase": "load_bag"})
+                self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "load_bag"})
 
     def _handle_load(self, pid: int, action: Action):
         """Handle load bag phase action."""
@@ -387,16 +596,16 @@ class SheriffEnv(BaseEnvironment):
                 p.hand.remove(cid)
                 p.bag.append(cid)
         
-        # Log
+        # Log (public summary)
         if self.logger:
-            self.logger.log_event(
-                EventType.ACTION,
+            self.logger.log(
+                EventType.PLAYER_ACTION,
                 {
                     "player_id": pid,
                     "phase": "load_bag",
                     "bag_size": len(p.bag),
                 },
-                is_private=True,
+                is_private=False,
             )
         
         self._advance_load()
@@ -413,33 +622,77 @@ class SheriffEnv(BaseEnvironment):
                 st.sheriff_idx, current_offset + 1, st.config.n_players
             )
         else:
+            # Validate all merchants have loaded bags before moving to declare
+            for m_pid in merchants:
+                m_player = st.get_player(m_pid)
+                if len(m_player.bag) == 0:
+                    raise RuntimeError(f"Cannot enter DECLARE: Player {m_pid} has an empty bag.")
+            
             # Move to declare phase
             st.phase = Phase.DECLARE
             st.round_step = get_next_merchant_idx(st.sheriff_idx, 0, st.config.n_players)
             
             if self.logger:
-                self.logger.log_event(EventType.PHASE_CHANGE, {"new_phase": "declare"})
+                self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "declare"})
 
     def _handle_declare(self, pid: int, action: Action):
         """Handle declaration phase action."""
+        from .rules import validate_bag_and_declaration
+        
         st = self.state
         p = st.get_player(pid)
         
-        # Set declaration
+        # Get declaration
         declared_type_str = action.data.get("declared_type")
         declared_count = action.data.get("declared_count")
         
-        if declared_type_str:
-            p.declared_type = LegalType(declared_type_str)
+        # Convert to LegalType
+        declared_type = LegalType(declared_type_str) if declared_type_str else None
+        
+        # Validate bag and declaration
+        try:
+            validate_bag_and_declaration(
+                bag=p.bag,
+                declared_type=declared_type,
+                declared_count=declared_count,
+                bag_limit=st.config.bag_limit,
+            )
+        except ValueError as e:
+            # Log error and reject the declaration
+            if self.logger:
+                self.logger.log(
+                    EventType.ERROR,
+                    {
+                        "player_id": pid,
+                        "phase": "declare",
+                        "error": str(e),
+                    },
+                    is_private=False,
+                )
+            raise
+        
+        # Set declaration
+        p.declared_type = declared_type
         p.declared_count = declared_count
         
-        # Log
+        # Log PUBLIC info only (no bag contents)
         if self.logger:
+            self.logger.log(
+                EventType.PLAYER_ACTION,
+                {
+                    "player_id": pid,
+                    "phase": "declare",
+                    "declared_type": declared_type_str,
+                    "declared_count": declared_count,
+                },
+                is_private=False,
+            )
+            
+            # Log PRIVATE info (for analytics/debugging)
             bag_cards = [st.get_card_def(cid) for cid in p.bag]
             bag_class = classify_bag(bag_cards)
-            
-            self.logger.log_event(
-                EventType.ACTION,
+            self.logger.log(
+                EventType.PLAYER_ACTION,
                 {
                     "player_id": pid,
                     "phase": "declare",
@@ -448,7 +701,7 @@ class SheriffEnv(BaseEnvironment):
                     "bag_class": bag_class,
                     "actual_bag": [card.name for card in bag_cards],
                 },
-                is_private=False,  # Declaration is public
+                is_private=True,  # Hidden until inspection
             )
         
         self._advance_declare()
@@ -465,14 +718,21 @@ class SheriffEnv(BaseEnvironment):
                 st.sheriff_idx, current_offset + 1, st.config.n_players
             )
         else:
+            # Validate all merchants have declarations before moving to negotiate
+            for m_pid in merchants:
+                m_player = st.get_player(m_pid)
+                if m_player.declared_type is None or m_player.declared_count is None:
+                    raise RuntimeError(f"Cannot enter NEGOTIATE: Player {m_pid} has not declared.")
+            
             # Move to negotiate phase
             st.phase = Phase.NEGOTIATE
             st.round_step = get_next_merchant_idx(st.sheriff_idx, 0, st.config.n_players)
-            st.negotiation_round = 0
+            st.negotiation_round = 1  # Start at round 1
             st.offers = {}
+            st.sheriff_responses = set()  # Track which merchants sheriff has responded to
             
             if self.logger:
-                self.logger.log_event(EventType.PHASE_CHANGE, {"new_phase": "negotiate"})
+                self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "negotiate", "negotiation_round": 1})
 
     def _handle_negotiate(self, pid: int, action: Action):
         """Handle negotiation phase action."""
@@ -487,11 +747,17 @@ class SheriffEnv(BaseEnvironment):
                 st.inspected_merchants = set()
                 
                 if self.logger:
-                    self.logger.log_event(EventType.PHASE_CHANGE, {"new_phase": "inspect"})
+                    self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "inspect"})
             
             elif action_type == "respond":
                 merchant_pid = action.data.get("merchant")
                 decision = action.data.get("decision")  # "accept" or "reject"
+                
+                # Skip if already responded to this merchant in this round
+                if merchant_pid in st.sheriff_responses:
+                    return
+                
+                st.sheriff_responses.add(merchant_pid)
                 
                 if merchant_pid in st.offers:
                     offer = st.offers[merchant_pid]
@@ -519,16 +785,44 @@ class SheriffEnv(BaseEnvironment):
                     
                     # Log
                     if self.logger:
-                        self.logger.log_event(
-                            EventType.ACTION,
+                        self.logger.log(
+                            EventType.PLAYER_ACTION,
                             {
                                 "player_id": pid,
                                 "phase": "negotiate",
+                                "negotiation_round": st.negotiation_round,
                                 "merchant": merchant_pid,
                                 "decision": decision,
                                 "gold_transferred": offer.gold if offer.accepted else 0,
                             }
                         )
+                
+                # Check if all merchants have been responded to
+                merchants = st.get_all_merchants()
+                if len(st.sheriff_responses) >= len(merchants):
+                    # Sheriff has responded to all merchants
+                    if st.negotiation_round < st.config.max_negotiation_rounds:
+                        # Start another negotiation round
+                        st.negotiation_round += 1
+                        st.round_step = get_next_merchant_idx(st.sheriff_idx, 0, st.config.n_players)
+                        st.offers = {}
+                        st.sheriff_responses = set()
+                        
+                        if self.logger:
+                            self.logger.log(
+                                EventType.PHASE_CHANGE,
+                                {
+                                    "new_phase": "negotiate",
+                                    "negotiation_round": st.negotiation_round,
+                                }
+                            )
+                    else:
+                        # Max rounds reached, move to inspect
+                        st.phase = Phase.INSPECT
+                        st.inspected_merchants = set()
+                        
+                        if self.logger:
+                            self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "inspect"})
         else:
             # Merchant makes offer
             offer = Offer(
@@ -543,8 +837,8 @@ class SheriffEnv(BaseEnvironment):
             
             # Log
             if self.logger:
-                self.logger.log_event(
-                    EventType.ACTION,
+                self.logger.log(
+                    EventType.PLAYER_ACTION,
                     {
                         "player_id": pid,
                         "phase": "negotiate",
@@ -573,6 +867,8 @@ class SheriffEnv(BaseEnvironment):
 
     def _handle_inspect(self, pid: int, action: Action):
         """Handle inspection phase action."""
+        from .rules import compute_inspection_outcome
+        
         st = self.state
         
         action_type = action.data.get("type", "")
@@ -580,7 +876,7 @@ class SheriffEnv(BaseEnvironment):
             # Move to resolve phase
             st.phase = Phase.RESOLVE
             if self.logger:
-                self.logger.log_event(EventType.PHASE_CHANGE, {"new_phase": "resolve"})
+                self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "resolve"})
             return
         
         # Inspect or pass a merchant
@@ -595,64 +891,57 @@ class SheriffEnv(BaseEnvironment):
         sheriff = st.get_player(st.sheriff_idx)
         
         if choice == "inspect":
-            # Check truthfulness
-            bag_cards = [st.get_card_def(cid) for cid in merchant.bag]
-            truthful = is_declaration_truthful(
-                bag_cards, merchant.declared_type, merchant.declared_count
+            # Compute inspection outcome using the new rules
+            outcome = compute_inspection_outcome(
+                bag=merchant.bag,
+                declared_type=merchant.declared_type,
+                declared_count=merchant.declared_count,
+                card_defs=st.card_defs,
             )
             
-            # Calculate penalty
-            penalty = calculate_inspection_penalty(
-                bag_cards, merchant.declared_type, merchant.declared_count
-            )
+            # Apply gold deltas
+            sheriff.gold += outcome.sheriff_delta
+            merchant.gold += outcome.merchant_delta
             
-            if truthful:
-                # Sheriff pays merchant
-                self._transfer_penalty(sheriff, merchant, abs(penalty))
-                
-                # Merchant keeps goods in bag (go to stand)
-                for cid in merchant.bag:
-                    card = st.get_card_def(cid)
-                    if card.kind == CardKind.LEGAL:
-                        # Find matching legal type
-                        for lt in LegalType:
-                            if card.name == lt.value:
-                                merchant.stand_legal[lt].append(cid)
-                                break
-                    else:
-                        merchant.stand_contraband.append(cid)
-            else:
-                # Merchant pays sheriff
-                self._transfer_penalty(merchant, sheriff, abs(penalty))
-                
-                # Confiscate contraband and illegal goods
-                for cid in merchant.bag:
-                    card = st.get_card_def(cid)
-                    if card.kind == CardKind.LEGAL and card.name == merchant.declared_type.value:
-                        # Correct legal goods go to merchant stand
-                        merchant.stand_legal[merchant.declared_type].append(cid)
-                    else:
-                        # Contraband/illegal goods go to sheriff
-                        if card.kind == CardKind.LEGAL:
-                            for lt in LegalType:
-                                if card.name == lt.value:
-                                    sheriff.stand_legal[lt].append(cid)
-                                    break
-                        else:
-                            sheriff.stand_contraband.append(cid)
+            # Move delivered cards to merchant's stand
+            for cid in outcome.delivered:
+                c = st.get_card_def(cid)
+                if c.kind == CardKind.LEGAL:
+                    for lt in LegalType:
+                        if c.name == lt.value:
+                            merchant.stand_legal[lt].append(cid)
+                            break
+                else:
+                    merchant.stand_contraband.append(cid)
             
-            # Log
+            # Move confiscated cards to discard
+            for cid in outcome.confiscated:
+                st.discard_left.append(cid)
+            
+            # Log PUBLIC reveal after inspection
             if self.logger:
-                self.logger.log_event(
-                    EventType.ACTION,
+                # Create a reveal showing what was in the bag
+                revealed_cards = []
+                for cid in outcome.delivered + outcome.confiscated:
+                    revealed_cards.append(st.get_card_def(cid).name)
+                
+                self.logger.log(
+                    EventType.PLAYER_ACTION,
                     {
                         "player_id": pid,
                         "phase": "inspect",
                         "merchant": merchant_pid,
                         "choice": "inspect",
-                        "truthful": truthful,
-                        "penalty": penalty,
-                    }
+                        "truthful": outcome.truthful,
+                        "revealed_cards": revealed_cards,
+                        "delivered": outcome.delivered,
+                        "confiscated": outcome.confiscated,
+                        "penalties": {
+                            "sheriff_delta": outcome.sheriff_delta,
+                            "merchant_delta": outcome.merchant_delta,
+                        },
+                    },
+                    is_private=False,
                 )
         else:
             # Pass - merchant gets all goods
@@ -683,8 +972,8 @@ class SheriffEnv(BaseEnvironment):
             
             # Log
             if self.logger:
-                self.logger.log_event(
-                    EventType.ACTION,
+                self.logger.log(
+                    EventType.PLAYER_ACTION,
                     {
                         "player_id": pid,
                         "phase": "inspect",
@@ -715,7 +1004,7 @@ class SheriffEnv(BaseEnvironment):
             
             # Log game end
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.GAME_END,
                     {
                         "winner": winner_pid,
@@ -738,7 +1027,7 @@ class SheriffEnv(BaseEnvironment):
             st.inspected_merchants = set()
             
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.PHASE_CHANGE,
                     {
                         "new_phase": "market",

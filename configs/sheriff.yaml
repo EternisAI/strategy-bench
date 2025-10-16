@@ -1,0 +1,34 @@
+# Sheriff of Nottingham Game Configuration
+
+game: sheriff
+
+# Number of players (3-5)
+n_players: 4
+
+# Game settings
+n_rounds: 2               # How many times each player is sheriff
+max_bag_size: 5           # Maximum cards in a merchant's bag
+
+# Starting resources
+starting_gold: 50         # Gold each player starts with
+
+# Penalties and rewards
+honest_penalty: 0         # Penalty per honest goods confiscated
+contraband_penalty: 4     # Penalty per contraband confiscated
+bribe_limit: 50           # Maximum bribe amount
+
+# Negotiation
+negotiation_rounds: 2     # Rounds of negotiation per inspection
+
+# LLM Agent Settings
+agent:
+  model: "anthropic/claude-3.5-sonnet"
+  temperature: 0.85       # Higher temp for creative negotiation
+  memory_capacity: 30
+  
+# Logging
+logging:
+  enabled: true
+  output_dir: "experiments/sheriff"
+  log_private: false
+

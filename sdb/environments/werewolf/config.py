@@ -16,6 +16,7 @@ class WerewolfConfig:
         max_debate_turns: Maximum number of debate statements per day
         max_rounds: Maximum number of rounds before draw
         debate_retries: Number of retries for failed debate generation
+        vote_requires_majority: If True, requires >50% votes to eliminate (default: True)
     """
     n_players: int = 7
     n_werewolves: Optional[int] = None  # Auto-calculated if None
@@ -24,6 +25,7 @@ class WerewolfConfig:
     max_debate_turns: int = 10
     max_rounds: int = 50
     debate_retries: int = 3
+    vote_requires_majority: bool = True
     
     def __post_init__(self):
         """Validate and set default values."""
