@@ -1,11 +1,11 @@
 """Secret Hitler game environment implementation."""
 
 import random
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 
 from sdb.core.base_env import BaseEnvironment
 from sdb.core.base_agent import BaseAgent
-from sdb.core.types import Action, ActionType, GamePhase
+from sdb.core.types import Action, ActionType, GamePhase, Observation
 from sdb.core.exceptions import EnvironmentError, InvalidActionError
 from sdb.environments.secret_hitler.config import SecretHitlerConfig
 from sdb.environments.secret_hitler.state import SecretHitlerState
@@ -48,7 +48,7 @@ class SecretHitlerEnv(BaseEnvironment):
         
         super().__init__(agents=agents, config=config.__dict__, game_id=game_id, seed=config.seed)
         
-    def reset(self) -> SecretHitlerState:
+    def reset(self) -> Dict[int, Observation]:
         """Reset environment for new game.
         
         Returns:
@@ -97,7 +97,22 @@ class SecretHitlerEnv(BaseEnvironment):
                 "is_hitler": player.is_hitler
             })
         
-        return self.state
+        # Return initial observations for each player
+        observations = {}
+        for i in range(self.num_players):
+            player = self.state.players[i]
+            observations[i] = Observation(
+                player_id=i,
+                obs_type="role_assignment",
+                phase=GamePhase.SETUP,
+                data={
+                    "role": player.role.value,
+                    "party": player.party.value,
+                    "is_hitler": player.is_hitler,
+                    "instruction": f"You are {player.role.value} ({player.party.value}). The game will begin shortly."
+                }
+            )
+        return observations
     
     def step(self, action: Action) -> tuple[SecretHitlerState, bool]:
         """Execute one action in the game.
@@ -162,12 +177,34 @@ class SecretHitlerEnv(BaseEnvironment):
             # 5. Presidential Power (if applicable)
             if self.state.pending_power and self.state.pending_power != PresidentialPower.NONE:
                 self._execute_presidential_power()
+                
+                # Check if game ended (e.g., Hitler executed)
+                if self.state.is_terminal:
+                    return
             
             # Reset election tracker
             self.state.election_tracker = 0
+            
+            # Log tracker update
+            self.logger.log(EventType.INFO, {
+                "event": "election_tracker_reset",
+                "new_value": 0,
+                "reason": "government_passed"
+            })
         else:
             # Election failed
             self._failed_election()
+            
+            # Log tracker update (after increment in _failed_election)
+            self.logger.log(EventType.INFO, {
+                "event": "election_tracker_updated",
+                "new_value": self.state.election_tracker,
+                "reason": "election_failed"
+            })
+            
+            # Check if game ended (e.g., chaos policy triggered win)
+            if self.state.is_terminal:
+                return
         
         # 6. Advance to next president (unless just did special election)
         self._advance_president()
@@ -195,7 +232,9 @@ class SecretHitlerEnv(BaseEnvironment):
             try:
                 action = president.act(obs)
                 self._log_agent_reasoning(action, self.state.president_idx)
-                nominee = action.target if hasattr(action, 'target') else action.data.get('target')
+                
+                # FIX: Check if target is not None, not just if attribute exists
+                nominee = action.target if action.target is not None else action.data.get('nominee')
                 
                 if nominee not in legal_candidates:
                     self.logger.log_error("nomination", f"Invalid nominee {nominee} from {legal_candidates}")
@@ -203,7 +242,8 @@ class SecretHitlerEnv(BaseEnvironment):
                     obs.data["error"] = f"Invalid nominee {nominee}. Must be one of {legal_candidates}"
                     action = president.act(obs)
                     self._log_agent_reasoning(action, self.state.president_idx)
-                    nominee = action.target if hasattr(action, 'target') else action.data.get('target')
+                    # FIX: Check if target is not None, not just if attribute exists
+                    nominee = action.target if action.target is not None else action.data.get('nominee')
                     
                     # If still invalid, pick first legal as last resort
                     if nominee not in legal_candidates:
@@ -240,7 +280,12 @@ class SecretHitlerEnv(BaseEnvironment):
             obs.data["chancellor_nominee"] = self.state.chancellor_nominee
             obs.data["discussion_is_public"] = True
             obs.data["previous_statements"] = self.state.current_discussion.copy()
-            obs.data["instruction"] = "Make a PUBLIC statement about the nomination (all players will see this). You can also stay silent."
+            # Use proper prompt with JSON format
+            obs.data["instruction"] = prompts.get_discussion_instruction({
+                'president': self.state.president_idx,
+                'nominee': self.state.chancellor_nominee,
+                'previous_statements': self.state.current_discussion.copy()
+            })
             
             try:
                 # Agent can make a statement (returns Action with statement in data)
@@ -248,8 +293,8 @@ class SecretHitlerEnv(BaseEnvironment):
                 action = agent.act(obs)
                 self._log_agent_reasoning(action, player_id)
                 
-                # Extract statement from action
-                statement = action.data.get("statement", "")
+                # Extract statement from action (try multiple field names for robustness)
+                statement = action.data.get("statement") or action.data.get("text") or action.data.get("parameter") or ""
                 if statement and len(statement.strip()) > 0:
                     discussion_entry = {
                         "speaker": player_id,
@@ -292,15 +337,20 @@ class SecretHitlerEnv(BaseEnvironment):
             obs.data["chancellor"] = self.state.last_government.chancellor
             obs.data["discussion_is_public"] = True
             obs.data["previous_statements"] = self.state.current_discussion.copy()
-            obs.data["instruction"] = "Make a PUBLIC statement about the veto proposal (all players will see this). You can also stay silent."
+            # Use proper prompt with JSON format
+            obs.data["instruction"] = prompts.get_veto_discussion_instruction({
+                'president': self.state.president_idx,
+                'chancellor': self.state.last_government.chancellor,
+                'previous_statements': self.state.current_discussion.copy()
+            })
             
             try:
                 agent = self.agents[player_id]
                 action = agent.act(obs)
                 self._log_agent_reasoning(action, player_id)
                 
-                # Extract statement
-                statement = action.data.get("statement", "")
+                # Extract statement (try multiple field names for robustness)
+                statement = action.data.get("statement") or action.data.get("text") or action.data.get("parameter") or ""
                 if statement and len(statement.strip()) > 0:
                     discussion_entry = {
                         "speaker": player_id,
@@ -390,17 +440,22 @@ class SecretHitlerEnv(BaseEnvironment):
         # Check if passed
         passed = GameRules.check_election_passed(ja_count, len(self.state.alive_players))
         
-        # Log election result
+        # Log election result with tracker BEFORE update (for comparison)
+        tracker_before = self.state.election_tracker
+        
         self.logger.log(EventType.ELECTION_RESULT, {
             "passed": passed,
             "ja_votes": ja_count,
             "nein_votes": len(self.state.alive_players) - ja_count,
-            "election_tracker": self.state.election_tracker
+            "election_tracker_before": tracker_before,
+            "will_reset_tracker": passed,
+            "will_increment_tracker": not passed
         })
         
         # Log to terminal
         vote_emoji = "✅" if passed else "❌"
         print(f"   {vote_emoji} Election {'PASSED' if passed else 'FAILED'} ({ja_count} Ja, {len(self.state.alive_players) - ja_count} Nein)")
+        print(f"      Election Tracker: {tracker_before} → {'0 (reset)' if passed else tracker_before + 1}")
         
         if passed:
             # Check Hitler election after 3 fascist policies
@@ -432,15 +487,25 @@ class SecretHitlerEnv(BaseEnvironment):
         president_obs = self.state.get_observation(self.state.president_idx)
         president_obs.data["policies"] = [p.name for p in policies]
         
+        print(f"   🎴 President {self.state.president_idx} draws: {[p.name for p in policies]}")
+        
         try:
             action = self.agents[self.state.president_idx].act(president_obs)
             self._log_agent_reasoning(action, self.state.president_idx)
             discard_idx = action.data.get("discard", 0)
             discard_idx = max(0, min(2, discard_idx))  # Clamp to 0-2
+            
+            # Show president's thinking
+            reasoning = action.metadata.get("reasoning", "")
+            if reasoning:
+                # Extract key reasoning (first 150 chars)
+                reasoning_preview = reasoning[:150].replace("\n", " ")
+                print(f"      💭 President thinks: {reasoning_preview}...")
         except Exception:
             discard_idx = self.rng.randint(0, 2)
         
         discarded = policies.pop(discard_idx)
+        print(f"      ➡️  President discards {discarded.name}, passes {[p.name for p in policies]} to Chancellor")
         self.state.policy_deck.discard_policy(discarded)
         self.state.chancellor_hand = policies
         
@@ -458,6 +523,13 @@ class SecretHitlerEnv(BaseEnvironment):
                 # Check if chancellor proposes veto
                 if action.data.get("propose_veto", False):
                     veto_proposed = True
+                    
+                    # Show chancellor's veto reasoning
+                    reasoning = action.metadata.get("reasoning", "")
+                    if reasoning:
+                        reasoning_preview = reasoning[:150].replace("\n", " ")
+                        print(f"      💭 Chancellor thinks: {reasoning_preview}...")
+                    
                     self.logger.log(EventType.VETO_PROPOSED, {
                         "president": self.state.president_idx,
                         "chancellor": self.state.last_government.chancellor
@@ -476,6 +548,12 @@ class SecretHitlerEnv(BaseEnvironment):
                         pres_action = self.agents[self.state.president_idx].act(president_obs)
                         self._log_agent_reasoning(pres_action, self.state.president_idx)
                         veto_accepted = pres_action.data.get("accept_veto", False)
+                        
+                        # Show president's veto response reasoning
+                        reasoning = pres_action.metadata.get("reasoning", "")
+                        if reasoning:
+                            reasoning_preview = reasoning[:150].replace("\n", " ")
+                            print(f"      💭 President thinks: {reasoning_preview}...")
                     except Exception:
                         veto_accepted = False  # Default: reject veto
                     
@@ -489,14 +567,14 @@ class SecretHitlerEnv(BaseEnvironment):
                         self.state.policy_deck.discard_policy(policies[0])
                         self.state.policy_deck.discard_policy(policies[1])
                         self.state.election_tracker += 1
-                        print(f"   🚫 President accepts veto - both policies discarded!")
+                        print(f"   ✅ President accepts veto - both policies discarded!")
                         
                         # Check for chaos
                         if self.state.election_tracker >= 3:
                             self._enact_chaos_policy()
                         return
                     else:
-                        print(f"   🚫 President rejects veto - Chancellor must enact a policy")
+                        print(f"   ❌ President rejects veto - Chancellor must enact a policy")
                         veto_proposed = False  # Continue to normal enactment
             except Exception:
                 pass
@@ -507,16 +585,26 @@ class SecretHitlerEnv(BaseEnvironment):
             chancellor_obs.data["policies"] = [p.name for p in policies]
             chancellor_obs.data["veto_available"] = False  # Veto rejected or not available
             
+            print(f"   🎴 Chancellor {self.state.last_government.chancellor} receives: {[p.name for p in policies]}")
+            
             try:
                 action = self.agents[self.state.last_government.chancellor].act(chancellor_obs)
                 self._log_agent_reasoning(action, self.state.last_government.chancellor)
                 enact_idx = action.data.get("enact", 0)
                 enact_idx = max(0, min(1, enact_idx))  # Clamp to 0-1
+                
+                # Show chancellor's thinking
+                reasoning = action.metadata.get("reasoning", "")
+                if reasoning:
+                    # Extract key reasoning (first 150 chars)
+                    reasoning_preview = reasoning[:150].replace("\n", " ")
+                    print(f"      💭 Chancellor thinks: {reasoning_preview}...")
             except Exception:
                 enact_idx = self.rng.randint(0, 1)
             
             enacted = policies[enact_idx]
             discarded = policies[1 - enact_idx]
+            print(f"      ✅ Chancellor enacts {enacted.name}, discards {discarded.name}")
             self.state.policy_deck.discard_policy(discarded)
             
             # Update policy counts
@@ -700,8 +788,15 @@ class SecretHitlerEnv(BaseEnvironment):
         """Handle failed election."""
         self.state.election_tracker += 1
         
+        # Warn about impending chaos
+        if self.state.election_tracker == 1:
+            print(f"      ⚠️  Election Tracker: 1/3 (2 more failures = chaos)")
+        elif self.state.election_tracker == 2:
+            print(f"      🚨 Election Tracker: 2/3 (1 more failure = CHAOS!)")
+        
         if self.state.election_tracker >= 3:
             # Chaos - enact top policy
+            print(f"      💥 3 CONSECUTIVE FAILURES! Chaos policy will be enacted...")
             self._enact_chaos_policy()
     
     def _check_game_over(self) -> bool:
@@ -776,7 +871,7 @@ class SecretHitlerEnv(BaseEnvironment):
     
     def _validate_num_players(self):
         """Validate player count."""
-        if self.num_players < 5 or self.num_players > 10:
+        if not (5 <= self.num_players <= 10):
             raise EnvironmentError(f"Secret Hitler requires 5-10 players, got {self.num_players}")
     
     def get_winner(self):

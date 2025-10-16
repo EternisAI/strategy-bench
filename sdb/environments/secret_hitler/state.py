@@ -185,4 +185,14 @@ class SecretHitlerState(BaseState):
     def get_player(self, player_id: int) -> PlayerInfo:
         """Get player info."""
         return self.players[player_id]
+    
+    def eliminate_player(self, player_id: int) -> None:
+        """Mark a player as eliminated (executed).
+        
+        Args:
+            player_id: ID of player to eliminate
+        """
+        if player_id in self.alive_players:
+            self.alive_players.remove(player_id)
+        self.players[player_id].is_alive = False
 
