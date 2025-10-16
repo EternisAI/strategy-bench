@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from sdb.core.base_state import BaseState
+# from sdb.core.base_state import BaseState  # Not needed - using plain dataclass
 from sdb.environments.spyfall.types import (
     AccusationState,
     FinalVoteState,
@@ -14,7 +14,7 @@ from sdb.environments.spyfall.types import (
 
 
 @dataclass
-class SpyfallState(BaseState):
+class SpyfallState:
     """Complete state of a Spyfall game.
     
     Attributes:

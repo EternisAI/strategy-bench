@@ -52,8 +52,11 @@ class AccusationState:
         return len(self.votes) >= len(self.voters)
     
     def is_successful(self) -> bool:
-        """Check if accusation passed (unanimous yes)."""
-        return self.is_complete() and all(self.votes.values())
+        """Check if accusation passed (majority yes among voters)."""
+        if not self.is_complete():
+            return False
+        yes = sum(1 for v in self.votes.values() if v)
+        return yes > (len(self.voters) // 2)
 
 
 @dataclass
@@ -63,13 +66,11 @@ class FinalVoteState:
     current_suspect: Optional[int] = None
     votes: Dict[int, bool] = field(default_factory=dict)
     nominators_tried: set = field(default_factory=set)
+    total_voters: int = 0  # n_players - 1 (exclude suspect)
     
     def is_vote_complete(self) -> bool:
         """Check if current vote is complete."""
-        if self.current_suspect is None:
-            return False
-        # All players except suspect should vote
-        return len(self.votes) >= (len(self.nominators_tried) + 1)
+        return self.current_suspect is not None and len(self.votes) >= self.total_voters
     
     def is_vote_successful(self) -> bool:
         """Check if current vote passed (unanimous yes)."""

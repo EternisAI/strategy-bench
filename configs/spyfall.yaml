@@ -1,0 +1,31 @@
+# Spyfall Game Configuration
+
+game: spyfall
+
+# Number of players (3-12)
+n_players: 5
+
+# Game mechanics
+max_turns: 8              # Maximum Q&A turns before voting
+timer_minutes: 8          # Real-time timer (for reference only in async)
+
+# Accusation settings
+allow_early_accusation: true    # Allow accusations before all turns complete
+accusation_threshold: 0.5       # Fraction of players needed to accuse
+
+# Location pool
+use_default_locations: true     # Use built-in location list
+# custom_locations: []          # Optional custom location list
+
+# LLM Agent Settings
+agent:
+  model: "openai/gpt-4o-mini"
+  temperature: 0.8
+  memory_capacity: 25
+  
+# Logging
+logging:
+  enabled: true
+  output_dir: "experiments/spyfall"
+  log_private: false
+

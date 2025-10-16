@@ -35,14 +35,16 @@ class SpyfallEnv(BaseEnvironment):
             game_id: Optional game ID
             logger: Optional GameLogger instance
         """
-        self.config = config or SpyfallConfig()
-        super().__init__(agents, game_id, logger)
-        self.state: SpyfallState = SpyfallState()
+        config = config or SpyfallConfig()
+        self.game_config = config
         self.rng = random.Random()
+        self.logger = logger
+        super().__init__(agents, config=config.__dict__, game_id=game_id, seed=getattr(config, 'seed', None))
     
-    def _validate_num_players(self, num_players: int) -> bool:
+    def _validate_num_players(self):
         """Validate number of players."""
-        return 3 <= num_players <= 12
+        if not (3 <= self.num_players <= 12):
+            raise EnvironmentError(f"Spyfall requires 3-12 players, got {self.num_players}")
     
     def _get_current_player(self) -> Optional[int]:
         """Get the current acting player."""
@@ -61,7 +63,7 @@ class SpyfallEnv(BaseEnvironment):
                 if self.state.final_vote.current_suspect is None:
                     return self.state.final_vote.current_nominator
                 # Return first player who hasn't voted
-                for pid in range(self.config.n_players):
+                for pid in range(self.game_config.n_players):
                     if pid != self.state.final_vote.current_suspect and pid not in self.state.final_vote.votes:
                         return pid
         return None
@@ -76,8 +78,11 @@ class SpyfallEnv(BaseEnvironment):
     
     def reset(self) -> Dict[int, Observation]:
         """Reset the game state."""
+        # Initialize state
+        self.state = SpyfallState()
+        
         # Assign roles and location
-        location, spy_index, cards = assign_roles(self.config, self.rng)
+        location, spy_index, cards = assign_roles(self.game_config, self.rng)
         
         # Initialize state
         self.state.phase = Phase.QANDA
@@ -86,42 +91,54 @@ class SpyfallEnv(BaseEnvironment):
         self.state.spy_index = spy_index
         self.state.cards = cards
         self.state.qa_history = []
-        self.state.current_asker = self.config.dealer_index
+        self.state.current_asker = self.game_config.dealer_index
         self.state.awaiting_answer_from = None
         self.state.cannot_ask_back = None
-        self.state.stops_used = {i: False for i in range(self.config.n_players)}
+        self.state.stops_used = {i: False for i in range(self.game_config.n_players)}
         self.state.spy_guess_allowed = True
         self.state.accusation = None
         self.state.final_vote = None
         self.state.winner = None
-        self.state.scores = {i: 0 for i in range(self.config.n_players)}
+        self.state.scores = {i: 0 for i in range(self.game_config.n_players)}
         self.state.win_reason = ""
         
         # Log game start
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 event_type=EventType.GAME_START,
                 data={
-                    "n_players": self.config.n_players,
+                    "n_players": self.game_config.n_players,
                     "location": location,
                     "spy_index": spy_index,
-                    "dealer": self.config.dealer_index,
+                    "dealer": self.game_config.dealer_index,
                 }
             )
         
         return self._get_observations()
     
-    def step(self, action: Action) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
+    def step(self, actions: Dict[int, Action]) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
         """Execute one step of the game."""
-        # Handle action based on phase
-        if self.state.phase == Phase.QANDA:
-            self._handle_qanda_action(action)
-        elif self.state.phase == Phase.ACCUSATION_VOTE:
-            self._handle_accusation_vote(action)
-        elif self.state.phase == Phase.FINAL_VOTE:
-            self._handle_final_vote_action(action)
-        elif self.state.phase == Phase.SPY_GUESS:
-            self._handle_spy_guess_action(action)
+        # Handle actions from relevant players based on phase
+        for player_id, action in actions.items():
+            if self.state.phase == Phase.QANDA:
+                self._handle_qanda_action(action)
+            elif self.state.phase == Phase.ACCUSATION_VOTE:
+                self._handle_accusation_vote(action)
+            elif self.state.phase == Phase.FINAL_VOTE:
+                # Only process actions from players who should act
+                if self.state.final_vote:
+                    if self.state.final_vote.current_suspect is None:
+                        # Only nominator can act
+                        if player_id == self.state.final_vote.current_nominator:
+                            self._handle_final_vote_action(action)
+                    else:
+                        # Everyone except suspect can vote
+                        if player_id != self.state.final_vote.current_suspect:
+                            self._handle_final_vote_action(action)
+            elif self.state.phase == Phase.SPY_GUESS:
+                # Only process action from the spy
+                if player_id == self.state.spy_index:
+                    self._handle_spy_guess_action(action)
         
         # Get observations
         observations = self._get_observations()
@@ -130,7 +147,7 @@ class SpyfallEnv(BaseEnvironment):
         done = self.state.phase == Phase.GAME_END
         
         # Calculate rewards
-        rewards = {pid: 0.0 for pid in range(self.config.n_players)}
+        rewards = {pid: 0.0 for pid in range(self.game_config.n_players)}
         if done:
             for pid, score in self.state.scores.items():
                 rewards[pid] = float(score)
@@ -158,21 +175,42 @@ class SpyfallEnv(BaseEnvironment):
             pass  # No action needed
         else:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": f"Unknown action type: {action_type}"}
                 )
     
     def _handle_ask(self, action: Action):
         """Handle asking a question."""
+        # Disallow new question if we are waiting for an answer
+        if self.state.awaiting_answer_from is not None:
+            if self.logger:
+                self.logger.log(
+                    EventType.ERROR,
+                    {
+                        "player_id": action.player_id,
+                        "error": "Cannot ask while awaiting an answer"
+                    }
+                )
+            return
+        
         target = action.data.get("target")
         question = action.data.get("question", "")
         
         if not question:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": "Empty question"}
+                )
+            return
+        
+        # Check if target is provided
+        if target is None:
+            if self.logger:
+                self.logger.log(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "No target provided for question"}
                 )
             return
         
@@ -180,13 +218,13 @@ class SpyfallEnv(BaseEnvironment):
         valid, error = validate_question_target(
             action.player_id,
             target,
-            self.config.n_players,
+            self.game_config.n_players,
             self.state.cannot_ask_back
         )
         
         if not valid:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": error}
                 )
@@ -194,7 +232,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log question
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.DISCUSSION,
                 {
                     "turn": self.state.turn,
@@ -215,7 +253,7 @@ class SpyfallEnv(BaseEnvironment):
         
         if not answer:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": "Empty answer"}
                 )
@@ -236,7 +274,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log answer
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.DISCUSSION,
                 {
                     "turn": self.state.turn,
@@ -252,23 +290,32 @@ class SpyfallEnv(BaseEnvironment):
         self.state.cannot_ask_back = asker  # Can't ask back to previous asker
         
         # Check if turn limit reached
-        if self.state.turn >= self.config.max_turns:
+        if self.state.turn >= self.game_config.max_turns:
             self._start_final_voting()
     
     def _handle_accuse(self, action: Action):
         """Handle stopping the clock to accuse someone."""
         suspect = action.data.get("suspect")
         
+        # Check if suspect is provided
+        if suspect is None:
+            if self.logger:
+                self.logger.log(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "No suspect provided in accusation"}
+                )
+            return
+        
         # Validate accusation
         valid, error = validate_accusation_target(
             action.player_id,
             suspect,
-            self.config.n_players
+            self.game_config.n_players
         )
         
         if not valid:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": error}
                 )
@@ -280,7 +327,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log accusation
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.PLAYER_ACTION,
                 {
                     "turn": self.state.turn,
@@ -292,7 +339,7 @@ class SpyfallEnv(BaseEnvironment):
             )
         
         # Start accusation vote
-        voters = [i for i in range(self.config.n_players) if i != suspect]
+        voters = [i for i in range(self.game_config.n_players) if i != suspect]
         self.state.accusation = AccusationState(
             accuser=action.player_id,
             suspect=suspect,
@@ -305,7 +352,7 @@ class SpyfallEnv(BaseEnvironment):
         """Handle spy attempting to guess location."""
         if action.player_id != self.state.spy_index:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": "Only spy can guess location"}
                 )
@@ -313,7 +360,7 @@ class SpyfallEnv(BaseEnvironment):
         
         if not self.state.can_spy_guess():
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": "Spy cannot guess location now"}
                 )
@@ -321,7 +368,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log spy guess attempt
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.PLAYER_ACTION,
                 {
                     "turn": self.state.turn,
@@ -337,16 +384,25 @@ class SpyfallEnv(BaseEnvironment):
         """Handle spy's location guess."""
         guess = action.data.get("guess")
         
+        # Check if guess is provided
+        if guess is None:
+            if self.logger:
+                self.logger.log(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "No location guess provided"}
+                )
+            return
+        
         # Validate guess
         valid, is_correct, error = validate_spy_guess(
             guess,
             self.state.location,
-            self.config.locations
+            self.game_config.locations
         )
         
         if not valid:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": error}
                 )
@@ -354,7 +410,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log guess
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.PLAYER_ACTION,
                 {
                     "player_id": action.player_id,
@@ -374,7 +430,7 @@ class SpyfallEnv(BaseEnvironment):
             self.state.win_reason = "Spy guessed location incorrectly"
         
         self.state.scores = calculate_scores(
-            self.config.n_players,
+            self.game_config.n_players,
             self.state.spy_index,
             self.state.winner,
             is_correct
@@ -382,7 +438,7 @@ class SpyfallEnv(BaseEnvironment):
         self.state.phase = Phase.GAME_END
         
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.GAME_END,
                 {
                     "winner": self.state.winner,
@@ -397,10 +453,15 @@ class SpyfallEnv(BaseEnvironment):
         
         if vote is None:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": "No vote provided"}
                 )
+            return
+        
+        # Check for duplicate vote
+        if action.player_id in self.state.accusation.votes:
+            # Already voted - ignore duplicate
             return
         
         # Record vote
@@ -408,7 +469,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log vote
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.VOTE_CAST,
                 {
                     "voter": action.player_id,
@@ -429,8 +490,8 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log result
         if self.logger:
-            self.logger.log_event(
-                EventType.VOTE_RESULT,
+            self.logger.log(
+                EventType.ELECTION_RESULT,
                 {
                     "passed": passed,
                     "suspect": suspect,
@@ -450,7 +511,7 @@ class SpyfallEnv(BaseEnvironment):
                 self.state.win_reason = "Wrong player was accused"
             
             self.state.scores = calculate_scores(
-                self.config.n_players,
+                self.game_config.n_players,
                 self.state.spy_index,
                 self.state.winner,
                 False
@@ -458,7 +519,7 @@ class SpyfallEnv(BaseEnvironment):
             self.state.phase = Phase.GAME_END
             
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.GAME_END,
                     {
                         "winner": self.state.winner,
@@ -468,7 +529,7 @@ class SpyfallEnv(BaseEnvironment):
                 )
         else:
             # Accusation failed - return to Q&A or end game
-            if self.state.turn >= self.config.max_turns:
+            if self.state.turn >= self.game_config.max_turns:
                 self._start_final_voting()
             else:
                 self.state.phase = Phase.QANDA
@@ -478,7 +539,7 @@ class SpyfallEnv(BaseEnvironment):
         """Start final voting phase."""
         # Log start of final voting
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.PHASE_CHANGE,
                 {
                     "from_phase": self.state.phase.value,
@@ -505,7 +566,7 @@ class SpyfallEnv(BaseEnvironment):
             self._handle_final_vote(action)
         else:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": f"Unknown action type: {action_type}"}
                 )
@@ -514,16 +575,25 @@ class SpyfallEnv(BaseEnvironment):
         """Handle nominating a suspect in final voting."""
         suspect = action.data.get("suspect")
         
+        # Check if suspect is provided
+        if suspect is None:
+            if self.logger:
+                self.logger.log(
+                    EventType.ERROR,
+                    {"player_id": action.player_id, "error": "No suspect provided in nomination"}
+                )
+            return
+        
         # Validate
         valid, error = validate_accusation_target(
             action.player_id,
             suspect,
-            self.config.n_players
+            self.game_config.n_players
         )
         
         if not valid:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": error}
                 )
@@ -531,7 +601,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log nomination
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.PLAYER_ACTION,
                 {
                     "nominator": action.player_id,
@@ -542,6 +612,7 @@ class SpyfallEnv(BaseEnvironment):
             )
         
         self.state.final_vote.current_suspect = suspect
+        self.state.final_vote.total_voters = self.game_config.n_players - 1  # Everyone except suspect
         self.state.final_vote.votes = {}
     
     def _handle_final_vote(self, action: Action):
@@ -550,10 +621,15 @@ class SpyfallEnv(BaseEnvironment):
         
         if vote is None:
             if self.logger:
-                self.logger.log_event(
+                self.logger.log(
                     EventType.ERROR,
                     {"player_id": action.player_id, "error": "No vote provided"}
                 )
+            return
+        
+        # Check for duplicate vote
+        if action.player_id in self.state.final_vote.votes:
+            # Already voted - ignore duplicate
             return
         
         # Record vote
@@ -561,7 +637,7 @@ class SpyfallEnv(BaseEnvironment):
         
         # Log vote
         if self.logger:
-            self.logger.log_event(
+            self.logger.log(
                 EventType.VOTE_CAST,
                 {
                     "voter": action.player_id,
@@ -571,19 +647,23 @@ class SpyfallEnv(BaseEnvironment):
                 is_private=True
             )
         
-        # Check if voting complete
-        if self.state.final_vote.is_vote_complete():
+        # Check if voting complete (all players except suspect have voted)
+        expected_votes = self.game_config.n_players - 1  # Everyone except suspect
+        if len(self.state.final_vote.votes) >= expected_votes:
             self._resolve_final_vote()
     
     def _resolve_final_vote(self):
         """Resolve final vote."""
-        passed = self.state.final_vote.is_vote_successful()
+        # Check if vote passed (majority, not unanimous)
+        yes_votes = sum(1 for v in self.state.final_vote.votes.values() if v)
+        total_votes = len(self.state.final_vote.votes)
+        passed = yes_votes > (total_votes / 2)  # Strict majority
         suspect = self.state.final_vote.current_suspect
         
         # Log result
         if self.logger:
-            self.logger.log_event(
-                EventType.VOTE_RESULT,
+            self.logger.log(
+                EventType.ELECTION_RESULT,
                 {
                     "passed": passed,
                     "suspect": suspect,
@@ -592,43 +672,29 @@ class SpyfallEnv(BaseEnvironment):
             )
         
         if passed:
-            # Vote passed - end game
+            # Vote passed
             is_spy = (suspect == self.state.spy_index)
             
             if is_spy:
-                self.state.winner = "non_spy"
-                self.state.win_reason = "Spy was correctly identified in final vote"
+                # Spy was correctly identified - give spy chance to guess location!
+                if self.logger:
+                    self.logger.log(
+                        EventType.INFO,
+                        {
+                            "message": "Spy correctly identified! Spy gets one guess to steal the win.",
+                            "spy": suspect,
+                        }
+                    )
+                # Transition to spy guess phase
+                self.state.phase = Phase.SPY_GUESS
+                self.state.spy_guess_allowed = True
             else:
+                # Wrong player accused - spy wins
                 self.state.winner = "spy"
                 self.state.win_reason = "Wrong player was accused in final vote"
-            
-            self.state.scores = calculate_scores(
-                self.config.n_players,
-                self.state.spy_index,
-                self.state.winner,
-                False
-            )
-            self.state.phase = Phase.GAME_END
-            
-            if self.logger:
-                self.logger.log_event(
-                    EventType.GAME_END,
-                    {
-                        "winner": self.state.winner,
-                        "reason": self.state.win_reason,
-                        "scores": self.state.scores,
-                    }
-                )
-        else:
-            # Vote failed - try next nominator or end game
-            self.state.final_vote.nominators_tried.add(self.state.final_vote.current_nominator)
-            
-            if len(self.state.final_vote.nominators_tried) >= self.config.n_players:
-                # All players tried - spy wins
-                self.state.winner = "spy"
-                self.state.win_reason = "No consensus reached in final voting"
+                
                 self.state.scores = calculate_scores(
-                    self.config.n_players,
+                    self.game_config.n_players,
                     self.state.spy_index,
                     self.state.winner,
                     False
@@ -636,7 +702,32 @@ class SpyfallEnv(BaseEnvironment):
                 self.state.phase = Phase.GAME_END
                 
                 if self.logger:
-                    self.logger.log_event(
+                    self.logger.log(
+                        EventType.GAME_END,
+                        {
+                            "winner": self.state.winner,
+                            "reason": self.state.win_reason,
+                            "scores": self.state.scores,
+                        }
+                    )
+        else:
+            # Vote failed - try next nominator or end game
+            self.state.final_vote.nominators_tried.add(self.state.final_vote.current_nominator)
+            
+            if len(self.state.final_vote.nominators_tried) >= self.game_config.n_players:
+                # All players tried - spy wins
+                self.state.winner = "spy"
+                self.state.win_reason = "No consensus reached in final voting"
+                self.state.scores = calculate_scores(
+                    self.game_config.n_players,
+                    self.state.spy_index,
+                    self.state.winner,
+                    False
+                )
+                self.state.phase = Phase.GAME_END
+                
+                if self.logger:
+                    self.logger.log(
                         EventType.GAME_END,
                         {
                             "winner": self.state.winner,
@@ -645,11 +736,13 @@ class SpyfallEnv(BaseEnvironment):
                         }
                     )
             else:
-                # Move to next nominator
-                next_nominator = (self.state.final_vote.current_nominator + 1) % self.config.n_players
-                self.state.final_vote.current_nominator = next_nominator
+                # Reset for next nominator
                 self.state.final_vote.current_suspect = None
                 self.state.final_vote.votes = {}
+                # Move to next nominator (will be handled in next iteration)
+                remaining = [i for i in range(self.game_config.n_players) if i not in self.state.final_vote.nominators_tried]
+                if remaining:
+                    self.state.final_vote.current_nominator = remaining[0]
     
     def _format_qa_history(self) -> str:
         """Format complete Q&A history for display.
@@ -676,7 +769,7 @@ class SpyfallEnv(BaseEnvironment):
             Formatted string of key game info
         """
         return f"""📊 GAME STATE:
-   • Turn: {self.state.turn}/{self.config.max_turns}
+   • Turn: {self.state.turn}/{self.game_config.max_turns}
    • Phase: {self.state.phase.value}
    • Current Asker: Player {self.state.current_asker if self.state.current_asker is not None else "N/A"}"""
     
@@ -684,11 +777,11 @@ class SpyfallEnv(BaseEnvironment):
         """Generate observations for all players."""
         observations = {}
         
-        for pid in range(self.config.n_players):
+        for pid in range(self.game_config.n_players):
             # Base observation data
             obs_data = {
                 "turn": self.state.turn,
-                "max_turns": self.config.max_turns,
+                "max_turns": self.game_config.max_turns,
                 "is_spy": self.state.is_spy(pid),
                 "location": self.state.get_player_location(pid),
                 "role": self.state.get_player_role(pid),
@@ -714,11 +807,14 @@ class SpyfallEnv(BaseEnvironment):
             obs_type = "observe"
             
             if self.state.phase == Phase.QANDA:
-                if self.state.awaiting_answer_from == pid:
-                    role_hint = f" (Your Role: {self.state.get_player_role(pid)})" if not self.state.is_spy(pid) else " (You're the SPY!)"
-                    location_hint = f" Location: {self.state.get_player_location(pid)}" if not self.state.is_spy(pid) else " You DON'T know the location!"
-                    
-                    instruction = f"""=== Q&A PHASE - YOUR TURN TO ANSWER ===
+                # Exactly one actor at a time in Q&A:
+                # If someone is awaited to answer, only they act.
+                if self.state.awaiting_answer_from is not None:
+                    if self.state.awaiting_answer_from == pid:
+                        role_hint = f" (Your Role: {self.state.get_player_role(pid)})" if not self.state.is_spy(pid) else " (You're the SPY!)"
+                        location_hint = f" Location: {self.state.get_player_location(pid)}" if not self.state.is_spy(pid) else " You DON'T know the location!"
+                        
+                        instruction = f"""=== Q&A PHASE - YOUR TURN TO ANSWER ===
 
 {self._format_game_state()}
 
@@ -731,16 +827,24 @@ YOUR ROLE:{role_hint}
 ⚡ YOUR ACTION:
 Answer the question. {"Be vague to blend in!" if self.state.is_spy(pid) else "Be specific to prove you know the location!"}
 
+⚠️  CRITICAL SPYFALL RULES:
+• NEVER directly name or state the location in your answer
+• {"Avoid being too specific or you'll reveal yourself as the spy" if self.state.is_spy(pid) else "Include 1-2 concrete details that prove you know the location"}
+• {"Be plausible but generic enough to blend in" if self.state.is_spy(pid) else "Reference role-specific activities, objects, or sensory details"}
+
 Respond with JSON:
 {{"type": "answer", "answer": "<your answer>"}}"""
-                    
-                    if self.state.can_stop_clock(pid):
-                        instruction += "\n\nOR accuse: {\"type\": \"accuse\", \"suspect\": <player_id>}"
-                    if self.state.is_spy(pid) and self.state.can_spy_guess():
-                        instruction += f"\n\nOR guess location: {{\"type\": \"spy_guess\", \"guess\": \"<location>\"}} from {self.config.locations}"
-                    obs_type = "act"
+                        
+                        if self.state.can_stop_clock(pid):
+                            instruction += "\n\nOR accuse: {\"type\": \"accuse\", \"suspect\": <player_id>}"
+                        if self.state.is_spy(pid) and self.state.can_spy_guess():
+                            instruction += f"\n\nOR guess location: {{\"type\": \"spy_guess\", \"guess\": \"<location>\"}} from {self.game_config.locations}"
+                        obs_type = "act"
+                    else:
+                        instruction = "Waiting for the answer."
+                        obs_type = "observe"
                 elif self.state.current_asker == pid:
-                    targets = [i for i in range(self.config.n_players) if i != pid and i != self.state.cannot_ask_back]
+                    targets = [i for i in range(self.game_config.n_players) if i != pid and i != self.state.cannot_ask_back]
                     role_hint = f" (Your Role: {self.state.get_player_role(pid)})" if not self.state.is_spy(pid) else " (You're the SPY!)"
                     location_hint = f" Location: {self.state.get_player_location(pid)}" if not self.state.is_spy(pid) else " You DON'T know the location!"
                     
@@ -757,6 +861,15 @@ YOUR ROLE:{role_hint}
 ⚡ YOUR ACTION:
 Ask a question to another player. {"Ask vague questions to blend in!" if self.state.is_spy(pid) else "Ask questions that test if they know the location!"}
 
+⚠️  CRITICAL SPYFALL RULE: You MUST NOT directly ask "where are we?", "what is this place?", "what location?", or similar direct location questions.
+Instead, ask indirect questions about:
+• Sensory details (sights, sounds, smells)
+• Activities or tasks performed here
+• Tools, equipment, or objects present
+• Clothing or dress code
+• Time-related constraints
+• Physical environment or dangers
+
 Available targets: {targets}
 Cannot ask back to: {self.state.cannot_ask_back if self.state.cannot_ask_back is not None else "None"}
 
@@ -766,10 +879,10 @@ Respond with JSON:
                     if self.state.can_stop_clock(pid):
                         instruction += "\n\nOR accuse: {\"type\": \"accuse\", \"suspect\": <player_id>}"
                     if self.state.is_spy(pid) and self.state.can_spy_guess():
-                        instruction += f"\n\nOR guess location: {{\"type\": \"spy_guess\", \"guess\": \"<location>\"}} from {self.config.locations}"
+                        instruction += f"\n\nOR guess location: {{\"type\": \"spy_guess\", \"guess\": \"<location>\"}} from {self.game_config.locations}"
                     obs_type = "act"
                 else:
-                    instruction = "Waiting for other players."
+                    instruction = "Waiting for the question."
                     obs_type = "observe"
             
             elif self.state.phase == Phase.ACCUSATION_VOTE:
@@ -821,7 +934,7 @@ Respond with JSON:
             elif self.state.phase == Phase.SPY_GUESS:
                 if pid == self.state.spy_index:
                     instruction = (
-                        f"Guess the location from: {self.config.locations}. "
+                        f"Guess the location from: {self.game_config.locations}. "
                         "Respond with JSON: {\"type\": \"guess\", \"guess\": \"<location>\"}"
                     )
                     obs_type = "act"
@@ -834,6 +947,7 @@ Respond with JSON:
                 obs_type = "observe"
             
             obs_data["instruction"] = instruction
+            obs_data["type"] = obs_type  # Add type to data dict for easy access
             
             observations[pid] = Observation(
                 player_id=pid,
