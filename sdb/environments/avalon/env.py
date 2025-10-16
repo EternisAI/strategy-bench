@@ -81,29 +81,41 @@ class AvalonEnv(BaseEnvironment):
             current_round=0,
         )
         
-        # Log game start
+        # Log game start (PUBLIC - no sensitive info)
         if self.logger:
+            # Initialize round counter to track quest progress
+            self.logger.current_round = 0
+            
             self.logger.log(
                 EventType.GAME_START,
                 {
                     "n_players": self.game_config.n_players,
                     "quest_leader": self.state.quest_leader,
-                    "roles": [p.role.value for p in players],
-                }
+                    "special_roles_enabled": {
+                        "merlin": self.game_config.include_merlin,
+                        "percival": self.game_config.include_percival,
+                        "morgana": self.game_config.include_morgana,
+                        "mordred": self.game_config.include_mordred,
+                        "oberon": self.game_config.include_oberon,
+                    },
+                    "seed": self.game_config.seed,
+                },
+                is_private=False,
             )
             
-            # Log role information for each player (private)
+            # Log role information for each player (PRIVATE)
             for pid, player in enumerate(players):
                 role_info = get_role_info_for_player(pid, players)
                 self.logger.log(
                     EventType.INFO,
                     {
-                        "event": "role_reveal",
+                        "event": "role_assignment",
                         "player_id": pid,
                         "role": player.role.value,
                         "team": player.team.value,
-                        "info": role_info,
+                        "visible_info": role_info,
                     },
+                    player_id=pid,
                     is_private=True,
                 )
         
@@ -134,24 +146,39 @@ class AvalonEnv(BaseEnvironment):
         return "\n".join(formatted)
     
     def _format_proposal_history(self) -> str:
-        """Format team proposal history for current quest.
+        """Format team proposal history with individual votes.
         
         Returns:
-            Formatted string of proposals and votes
+            Formatted string of all proposals and individual votes
         """
         if not self.state.proposal_history:
-            return "   (No proposals yet this quest)"
+            return "   (No proposals yet)"
         
         formatted = []
-        for i, prop in enumerate(self.state.proposal_history, 1):
-            votes = prop.votes if hasattr(prop, 'votes') else {}
-            approved = sum(1 for v in votes.values() if v == VoteChoice.APPROVE)
-            rejected = sum(1 for v in votes.values() if v == VoteChoice.REJECT)
+        for prop in self.state.proposal_history:
+            # Show proposal ID, quest, leader, team, and result
             result = "✅ APPROVED" if prop.approved else "❌ REJECTED"
+            quest_label = f"Q{prop.quest_num + 1}" if hasattr(prop, 'quest_num') else f"Q?"
+            proposal_id = f"#{prop.proposal_idx}" if hasattr(prop, 'proposal_idx') and prop.proposal_idx > 0 else f"#{len(formatted)+1}"
+            round_label = f"R{prop.round_idx}" if hasattr(prop, 'round_idx') and prop.round_idx > 0 else ""
             formatted.append(
-                f"   {i}. Leader {prop.leader} proposed {prop.team} → "
-                f"{approved} Approve, {rejected} Reject → {result}"
+                f"   {proposal_id} ({quest_label}{round_label}) - Leader {prop.leader} proposed {prop.team} → {result}"
             )
+            
+            # Show individual votes if available
+            if prop.votes:
+                vote_strs = []
+                for pid in sorted(prop.votes.keys()):
+                    vote = prop.votes[pid]
+                    emoji = "✅" if vote == "approve" else "❌"
+                    vote_strs.append(f"P{pid}:{emoji}")
+                formatted.append(f"      Votes: {' '.join(vote_strs)}")
+            else:
+                # Fallback to tallies if individual votes not available
+                formatted.append(
+                    f"      Votes: {prop.approve_votes} Approve, {prop.reject_votes} Reject"
+                )
+        
         return "\n".join(formatted)
     
     def _format_game_state_summary(self) -> str:
@@ -161,9 +188,17 @@ class AvalonEnv(BaseEnvironment):
             Formatted string of key game state info
         """
         st = self.state
+        
+        # Build quest results summary
+        quest_summary = []
+        for i, qr in enumerate(st.quest_results):
+            status = "✅ SUCCESS" if qr.succeeded else "❌ FAILED"
+            quest_summary.append(f"Quest {qr.quest_num + 1}: {status}")
+        quest_line = " | ".join(quest_summary) if quest_summary else "(No quests completed)"
+        
         return f"""📊 GAME STATE:
-   • Quests Succeeded: {st.quests_succeeded}/3
-   • Quests Failed: {st.quests_failed}/3
+   • Quest Results: {quest_line}
+   • Score: Good {st.quests_succeeded} - {st.quests_failed} Evil (first to 3 wins)
    • Current Quest: {st.current_quest + 1}/5
    • Team Rejections: {st.team_rejections}/{MAX_REJECTIONS}
    • Quest Leader: Player {st.quest_leader}"""
@@ -200,7 +235,7 @@ class AvalonEnv(BaseEnvironment):
 📜 QUEST HISTORY:
 {self._format_quest_history()}
 
-📋 PROPOSAL HISTORY (This Quest):
+📋 ALL PROPOSAL HISTORY (All Quests):
 {self._format_proposal_history()}
 
 ⚡ YOUR ACTION:
@@ -264,7 +299,7 @@ Example: {{"type": "propose_team", "team": {available_players[:st.get_team_size(
 📜 QUEST HISTORY:
 {self._format_quest_history()}
 
-📋 PROPOSAL HISTORY (This Quest):
+📋 ALL PROPOSAL HISTORY (All Quests):
 {self._format_proposal_history()}
 
 ⚠️  CURRENT PROPOSAL:
@@ -386,17 +421,24 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                 "proposed_team": None,
                 "on_proposed_team": False,
                 
-                # Quest history
+                # Quest history with clear outcomes
                 "quest_history": [
                     {
                         "quest_num": qr.quest_num + 1,
                         "team": qr.team_members,
+                        "team_size": len(qr.team_members),
                         "success_votes": qr.success_votes,
                         "fail_votes": qr.fail_votes,
                         "succeeded": qr.succeeded,
+                        "result": "SUCCESS" if qr.succeeded else "FAILED",
                     }
                     for qr in st.quest_results
                 ],
+                
+                # Summary statistics
+                "quests_succeeded": st.quests_succeeded,
+                "quests_failed": st.quests_failed,
+                "quests_remaining": 5 - (st.quests_succeeded + st.quests_failed),
                 
                 # Formatted full context for better readability
                 "formatted_quest_history": self._format_quest_history(),
@@ -422,6 +464,67 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         
         return obs
 
+    def _validate_action(self, player_id: int, action: Action, phase: Phase) -> tuple[bool, Optional[str]]:
+        """Validate that an action is allowed in the current phase.
+        
+        Args:
+            player_id: ID of acting player
+            action: Action being attempted
+            phase: Current game phase
+            
+        Returns:
+            (is_valid, error_message)
+        """
+        st = self.state
+        action_type = action.data.get("type", "")
+        
+        # Phase-specific action validation
+        ALLOWED_ACTIONS = {
+            Phase.TEAM_SELECTION: {"propose_team"},
+            Phase.TEAM_DISCUSSION: {"discuss_team", "wait"},
+            Phase.TEAM_VOTING: {"team_vote", "vote"},  # accept both for compatibility
+            Phase.QUEST_VOTING: {"quest_vote"},
+            Phase.ASSASSINATION: {"assassinate"},
+        }
+        
+        if action_type not in ALLOWED_ACTIONS.get(phase, set()):
+            return False, f"Action '{action_type}' not allowed in phase {phase.value}"
+        
+        # Team selection: only leader can propose
+        if phase == Phase.TEAM_SELECTION and player_id != st.quest_leader:
+            return False, f"Only quest leader (Player {st.quest_leader}) can propose team"
+        
+        # Quest voting: only team members can vote
+        if phase == Phase.QUEST_VOTING:
+            if st.current_proposal is None:
+                return False, "No team proposal exists for quest voting"
+            if player_id not in st.current_proposal.team:
+                return False, f"Player {player_id} not on quest team {st.current_proposal.team}"
+            # Validate quest vote is success/fail (check both 'vote' and 'quest_vote' keys)
+            vote = action.data.get("quest_vote") or action.data.get("vote", "")
+            if vote not in ["success", "fail"]:
+                return False, f"Quest vote must be 'success' or 'fail', got '{vote}'"
+            # Prevent double voting
+            if player_id in st.quest_voters_done:
+                return False, f"Player {player_id} already voted in this quest voting phase"
+        
+        # Team voting: validate approve/reject
+        if phase == Phase.TEAM_VOTING:
+            vote = action.data.get("vote", "")
+            if vote not in ["approve", "reject"]:
+                return False, f"Team vote must be 'approve' or 'reject', got '{vote}'"
+            # Prevent double voting
+            if player_id in st.team_votes_cast:
+                return False, f"Player {player_id} already voted in this team voting phase"
+        
+        # Assassination: only assassin can act
+        if phase == Phase.ASSASSINATION:
+            assassin_pid = find_assassin(st.players)
+            if player_id != assassin_pid:
+                return False, f"Only assassin (Player {assassin_pid}) can assassinate"
+        
+        return True, None
+    
     def step(self, actions: Dict[int, Action]) -> Tuple[
         Dict[int, Observation],
         Dict[int, float],
@@ -431,16 +534,38 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         """Execute actions and advance game state."""
         st = self.state
         
+        # Validate and filter actions
+        validated_actions = {}
+        for player_id, action in actions.items():
+            is_valid, error = self._validate_action(player_id, action, st.current_phase)
+            if is_valid:
+                validated_actions[player_id] = action
+            elif error:
+                # Log validation error privately
+                if self.logger:
+                    self.logger.log(
+                        EventType.INFO,
+                        {
+                            "event": "action_rejected",
+                            "player_id": player_id,
+                            "action_type": action.data.get("type"),
+                            "phase": st.current_phase.value,
+                            "reason": error,
+                        },
+                        is_private=True
+                    )
+        
+        # Execute validated actions
         if st.current_phase == Phase.TEAM_SELECTION:
-            self._handle_team_selection(actions)
+            self._handle_team_selection(validated_actions)
         elif st.current_phase == Phase.TEAM_DISCUSSION:
-            self._handle_team_discussion(actions)
+            self._handle_team_discussion(validated_actions)
         elif st.current_phase == Phase.TEAM_VOTING:
-            self._handle_team_voting(actions)
+            self._handle_team_voting(validated_actions)
         elif st.current_phase == Phase.QUEST_VOTING:
-            self._handle_quest_voting(actions)
+            self._handle_quest_voting(validated_actions)
         elif st.current_phase == Phase.ASSASSINATION:
-            self._handle_assassination(actions)
+            self._handle_assassination(validated_actions)
         
         # Get observations
         obs = self._get_observations()
@@ -488,10 +613,17 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                 )
             return
         
-        # Create proposal
+        # Increment proposal counters
+        st.total_proposals += 1
+        st.current_round += 1
+        
+        # Create proposal with tracking indices
         st.current_proposal = TeamProposal(
             leader=st.quest_leader,
             team=proposed_team,
+            quest_num=st.current_quest,
+            proposal_idx=st.total_proposals,
+            round_idx=st.current_round,
         )
         
         # Log
@@ -513,6 +645,14 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         st.discussion_order = [st.quest_leader] + [
             pid for pid in range(self.game_config.n_players) if pid != st.quest_leader
         ]
+        
+        # Clear vote tracking for new proposal
+        st.team_votes_cast = set()
+        st.quest_votes_by_player = {}
+        st.quest_voters_done = set()
+        
+        # Clear discussion tracking for new discussion round
+        st.spoken_this_round = set()
         
         # Move to team discussion
         st.current_phase = Phase.TEAM_DISCUSSION
@@ -537,6 +677,11 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         
         current_speaker = st.discussion_order[st.next_speaker_index]
         
+        # Skip if already spoken this round (duplicate protection)
+        if current_speaker in st.spoken_this_round:
+            st.next_speaker_index += 1
+            return
+        
         # Wait for current speaker's action
         if current_speaker not in actions:
             return
@@ -548,6 +693,24 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
             # Empty statement, just skip
             statement = "(no comment)"
         
+        # Normalize statement for duplicate detection
+        normalized_stmt = " ".join(statement.strip().split()).lower()
+        
+        # Check for duplicate (same player, same quest/proposal, similar text)
+        is_duplicate = False
+        for prev_stmt in st.current_discussion:
+            if prev_stmt.speaker_id == current_speaker:
+                prev_normalized = " ".join(prev_stmt.statement.split()).lower()
+                if prev_normalized == normalized_stmt:
+                    is_duplicate = True
+                    break
+        
+        if is_duplicate:
+            # Skip duplicate, don't record
+            st.next_speaker_index += 1
+            st.spoken_this_round.add(current_speaker)
+            return
+        
         # Record statement
         from .types import DiscussionStatement
         discussion_stmt = DiscussionStatement(
@@ -557,6 +720,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
             round_num=st.current_round
         )
         st.current_discussion.append(discussion_stmt)
+        st.spoken_this_round.add(current_speaker)  # Mark as spoken
         
         # Log discussion
         if self.logger:
@@ -592,6 +756,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                 vote = actions[pid].data.get("vote")
                 if vote in ("approve", "reject"):
                     votes[pid] = vote
+                    st.team_votes_cast.add(pid)  # Mark as voted
         
         # Need all votes
         if len(votes) < self.game_config.n_players:
@@ -601,6 +766,8 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         approves = sum(1 for v in votes.values() if v == "approve")
         rejects = sum(1 for v in votes.values() if v == "reject")
         
+        # Store individual votes and tallies in proposal
+        st.current_proposal.votes = votes
         st.current_proposal.approve_votes = approves
         st.current_proposal.reject_votes = rejects
         st.current_proposal.approved = approves > rejects
@@ -626,6 +793,9 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
             # Team approved, move to quest
             st.current_phase = Phase.QUEST_VOTING
             st.team_rejections = 0
+            # Clear quest voting tracking
+            st.quest_votes_by_player = {}
+            st.quest_voters_done = set()
             
             if self.logger:
                 self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "quest_voting"})
@@ -634,8 +804,8 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
             st.team_rejections += 1
             
             if st.team_rejections >= MAX_REJECTIONS:
-                # Force quest failure after 5 rejections
-                self._force_quest_failure()
+                # Evil wins immediately after 5 rejections (standard Avalon rule)
+                self._force_evil_win_by_rejections()
             else:
                 # Advance quest leader and try again
                 st.advance_quest_leader()
@@ -654,25 +824,41 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                     )
 
     def _handle_quest_voting(self, actions: Dict[int, Action]):
-        """Handle quest voting phase."""
+        """Handle quest voting phase - only team members can vote, exactly once."""
         st = self.state
         team = st.current_proposal.team
         
-        # Collect votes from team members only
-        votes = {}
+        # Collect votes from team members only (idempotent - duplicates ignored)
         for pid in team:
-            if pid in actions:
-                vote = actions[pid].data.get("quest_vote")
+            if pid in actions and pid not in st.quest_voters_done:
+                # Accept both 'quest_vote' and 'vote' keys for compatibility
+                vote = actions[pid].data.get("quest_vote") or actions[pid].data.get("vote")
                 if vote in ("success", "fail"):
-                    votes[pid] = vote
+                    st.quest_votes_by_player[pid] = vote
+                    st.quest_voters_done.add(pid)
+                    
+                    # Log privately (ballots are anonymous)
+                    if self.logger:
+                        self.logger.log(
+                            EventType.INFO,
+                            {
+                                "event": "quest_ballot_recorded",
+                                "player": pid,
+                                "ballot": vote,
+                                "progress": f"{len(st.quest_voters_done)}/{len(team)}",
+                            },
+                            player_id=pid,
+                            is_private=True
+                        )
         
-        # Need all team member votes
-        if len(votes) < len(team):
+        # Check if all team members have voted
+        if len(st.quest_voters_done) < len(team):
+            # Still waiting for votes
             return
         
-        # Count votes
-        success_votes = sum(1 for v in votes.values() if v == "success")
-        fail_votes = sum(1 for v in votes.values() if v == "fail")
+        # All votes collected - close quest voting
+        success_votes = sum(1 for v in st.quest_votes_by_player.values() if v == "success")
+        fail_votes = len(team) - success_votes
         
         fails_needed = st.get_fails_needed()
         succeeded = check_quest_result(fail_votes, fails_needed)
@@ -692,7 +878,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         else:
             st.quests_failed += 1
         
-        # Log
+        # Log quest result (PUBLIC - only show anonymous counts, never individual ballots)
         if self.logger:
             self.logger.log(
                 EventType.QUEST_RESULT,
@@ -703,8 +889,13 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                     "fail_votes": fail_votes,
                     "succeeded": succeeded,
                     "fails_needed": fails_needed,
-                }
+                },
+                is_private=False  # Public: only counts, not individual ballots
             )
+        
+        # Clear quest voting tracking after processing
+        st.quest_votes_by_player = {}
+        st.quest_voters_done = set()
         
         # Check if game ended
         game_over, winner = check_game_end(st.quests_succeeded, st.quests_failed)
@@ -719,20 +910,25 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                         self.logger.log(EventType.PHASE_CHANGE, {"new_phase": "assassination"})
                 else:
                     # No Merlin, Good wins outright
-                    self._end_game(Team.GOOD)
+                    reason = f"Good won: {st.quests_succeeded} quests succeeded (no Merlin to assassinate)"
+                    self._end_game(Team.GOOD, reason)
             else:
                 # Evil wins
-                self._end_game(Team.EVIL)
+                reason = f"Evil won: {st.quests_failed} quests failed"
+                self._end_game(Team.EVIL, reason)
         else:
             # Continue to next quest
             st.current_quest += 1
             st.current_round = 0
             st.current_proposal = None
-            st.proposal_history = []
+            # DON'T clear proposal_history - keep it for strategic analysis
             st.advance_quest_leader()
             st.current_phase = Phase.TEAM_SELECTION
             
             if self.logger:
+                # Update logger's round counter to match current quest
+                self.logger.current_round = st.current_quest
+                
                 self.logger.log(
                     EventType.PHASE_CHANGE,
                     {
@@ -760,7 +956,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         st.assassin_target = target
         target_player = st.get_player(target)
         
-        # Log
+        # Log assassination (PRIVATE - contains sensitive role information)
         if self.logger:
             self.logger.log(
                 EventType.PLAYER_ACTION,
@@ -769,7 +965,20 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                     "assassin": assassin_pid,
                     "target": target,
                     "target_role": target_player.role.value,
-                }
+                    "is_merlin": target_player.role == Role.MERLIN,
+                },
+                is_private=True  # Keep role information private
+            )
+            
+            # Also log a public version without sensitive info
+            self.logger.log(
+                EventType.INFO,
+                {
+                    "event": "assassination_occurred",
+                    "target": target,
+                    "result": "success" if target_player.role == Role.MERLIN else "failure"
+                },
+                is_private=False
             )
         
         # Check if assassin killed Merlin
@@ -780,62 +989,111 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
             # Good wins, assassin missed
             self._end_game(Team.GOOD, f"Assassin failed to kill Merlin (targeted Player {target})")
 
-    def _force_quest_failure(self):
-        """Force quest failure after 5 team rejections."""
+    def _force_evil_win_by_rejections(self):
+        """Evil wins immediately after 5 consecutive team rejections.
+        
+        This is the standard Avalon rule: 5 rejections → Evil wins instantly,
+        not through quest failure mechanics.
+        """
         st = self.state
         
-        # Quest automatically fails
-        quest_result = QuestResult(
-            quest_num=st.current_quest,
-            team_members=[],
-            success_votes=0,
-            fail_votes=1,
-            succeeded=False,
-        )
-        st.quest_results.append(quest_result)
-        st.quests_failed += 1
-        
+        # Log the rejection-triggered win
         if self.logger:
             self.logger.log(
-                EventType.QUEST_RESULT,
+                EventType.INFO,
                 {
+                    "event": "five_rejections_triggered",
                     "quest": st.current_quest + 1,
-                    "forced_failure": True,
-                    "reason": "5 consecutive team rejections",
+                    "rejections": st.team_rejections,
+                    "reason": "5 consecutive team proposal rejections",
                 }
             )
         
-        # Check game end
-        game_over, winner = check_game_end(st.quests_succeeded, st.quests_failed)
-        
-        if game_over:
-            self._end_game(winner)
-        else:
-            # Continue to next quest
-            st.current_quest += 1
-            st.current_round = 0
-            st.current_proposal = None
-            st.proposal_history = []
-            st.team_rejections = 0
-            st.advance_quest_leader()
-            st.current_phase = Phase.TEAM_SELECTION
+        # Evil wins immediately (standard Avalon rule)
+        reason = f"Evil wins: 5 consecutive team rejections on Quest {st.current_quest + 1}"
+        self._end_game(Team.EVIL, reason)
 
     def _end_game(self, winner: Team, reason: str = ""):
-        """End the game."""
+        """End the game with comprehensive summary."""
         st = self.state
         st.game_over = True
         st.winner = winner
         st.current_phase = Phase.GAME_END
         
         if self.logger:
+            # Build comprehensive game summary
+            summary_data = {
+                # Core outcome
+                "winner": winner.value,
+                "win_reason": reason or "Unknown",
+                
+                # Quest ledger
+                "quests_succeeded": st.quests_succeeded,
+                "quests_failed": st.quests_failed,
+                "total_quests_played": len(st.quest_results),
+                
+                # Quest details
+                "quest_results": [
+                    {
+                        "quest_num": qr.quest_num + 1,
+                        "team": qr.team_members,
+                        "success_votes": qr.success_votes,
+                        "fail_votes": qr.fail_votes,
+                        "succeeded": qr.succeeded,
+                    }
+                    for qr in st.quest_results
+                ],
+                
+                # Proposal statistics
+                "total_proposals": st.total_proposals,
+                "total_rejections": sum(1 for p in st.proposal_history if not p.approved),
+                "total_approvals": sum(1 for p in st.proposal_history if p.approved),
+                "max_consecutive_rejections": st.team_rejections,
+                
+                # Assassination details (if occurred)
+                "assassination_occurred": st.assassin_target is not None,
+                "assassin_target": st.assassin_target,
+                "assassin_correct": None,
+                
+                # Configuration snapshot
+                "config": {
+                    "n_players": self.game_config.n_players,
+                    "seed": self.game_config.seed,
+                    "special_roles": {
+                        "merlin": self.game_config.include_merlin,
+                        "percival": self.game_config.include_percival,
+                        "morgana": self.game_config.include_morgana,
+                        "mordred": self.game_config.include_mordred,
+                        "oberon": self.game_config.include_oberon,
+                    },
+                },
+                
+                # Role assignments (private)
+                "roles": [p.role.value for p in st.players],
+                "teams": [p.team.value for p in st.players],
+            }
+            
+            # Add assassination correctness if it occurred
+            if st.assassin_target is not None:
+                target_player = st.get_player(st.assassin_target)
+                summary_data["assassin_correct"] = (target_player.role == Role.MERLIN)
+                summary_data["target_role"] = target_player.role.value
+            
+            # Log comprehensive summary
             self.logger.log(
                 EventType.GAME_END,
+                summary_data,
+                is_private=False  # Summary is public except roles/teams
+            )
+            
+            # Also log private version with full details
+            self.logger.log(
+                EventType.INFO,
                 {
-                    "winner": winner.value,
-                    "reason": reason,
-                    "quests_succeeded": st.quests_succeeded,
-                    "quests_failed": st.quests_failed,
-                }
+                    "event": "game_summary_private",
+                    **summary_data,
+                },
+                is_private=True
             )
 
     def _validate_num_players(self):

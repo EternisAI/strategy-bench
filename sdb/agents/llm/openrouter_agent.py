@@ -162,20 +162,62 @@ Response Format:
                 messages=self.conversation_history[-15:]  # Keep context manageable
             )
             
-            # Log to terminal
-            print(f"      🤖 {self.name} thinks: {response.content[:80]}...")
+            # Log thinking to private only (not public console)
+            # print(f"      🤖 {self.name} thinks: {response.content[:80]}...")
             
             # Parse action from response
             action = self._parse_action_from_llm(response.content, observation)
             
+            # Check if JSON parsing failed (indicated by wait action)
+            if action.data.get("type") == "wait" and "raw_response" in action.data:
+                # Log to private only
+                # print(f"      ⚠️  JSON parse failed, retrying with 2x max_tokens...")
+                
+                # Save original max_tokens
+                original_max_tokens = self.llm_client.max_tokens
+                
+                try:
+                    # Double max_tokens for retry
+                    self.llm_client.max_tokens = original_max_tokens * 2
+                    
+                    # Add a clarification message
+                    self.conversation_history.append({
+                        "role": "assistant",
+                        "content": action.data.get("raw_response", "")[:200]
+                    })
+                    self.conversation_history.append({
+                        "role": "user",
+                        "content": "⚠️ Your response did not contain valid JSON. Please respond again with ONLY valid JSON in the exact format specified. No extra text, just the JSON object."
+                    })
+                    
+                    # Retry LLM call
+                    retry_response = await self._call_llm_with_retry(
+                        messages=self.conversation_history[-15:]
+                    )
+                    
+                    # Log to private only
+                    # print(f"      🔄 Retry response: {retry_response.content[:80]}...")
+                    
+                    # Parse retry response
+                    action = self._parse_action_from_llm(retry_response.content, observation)
+                    
+                    # Store retry reasoning
+                    action.metadata["reasoning"] = retry_response.content
+                    action.metadata["retry_attempt"] = True
+                    
+                finally:
+                    # Restore original max_tokens
+                    self.llm_client.max_tokens = original_max_tokens
+            
             # Store full reasoning in action metadata for logging
-            action.metadata["reasoning"] = response.content
+            if "reasoning" not in action.metadata:
+                action.metadata["reasoning"] = response.content
             action.metadata["agent_name"] = self.name
             
             # Add assistant response to history (truncated)
             self.conversation_history.append({
                 "role": "assistant",
-                "content": response.content[:500]  # Keep history manageable
+                "content": action.metadata.get("reasoning", response.content)[:500]  # Keep history manageable
             })
             
             # Update stats

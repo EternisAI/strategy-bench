@@ -1,0 +1,30 @@
+# Avalon Game Configuration
+
+game: avalon
+
+# Number of players (5-10)
+n_players: 5
+
+# Special roles
+include_merlin: true      # Merlin knows evil players (except Mordred)
+include_percival: false   # Percival knows Merlin/Morgana (but not which is which)
+include_morgana: false    # Morgana appears as Merlin to Percival
+include_mordred: false    # Mordred is hidden from Merlin
+include_oberon: false     # Oberon doesn't know other evil players
+
+# Game parameters
+max_rounds: 5             # Number of quests
+max_rejections: 5         # Max team rejections before force-pass
+
+# LLM Agent Settings
+agent:
+  model: "openai/gpt-4o-mini"
+  temperature: 0.8
+  memory_capacity: 30
+  
+# Logging
+logging:
+  enabled: true
+  output_dir: "experiments/avalon"
+  log_private: false      # Don't log private information (roles, etc.)
+

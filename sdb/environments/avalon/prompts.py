@@ -73,11 +73,14 @@ def get_team_discussion_instruction(
 - Build trust or create misdirection
 - You'll propose the actual team after discussion"""
     else:
-        guidance = f"""As PARTICIPANT, contribute to the discussion:
+        guidance = f"""As PARTICIPANT (you are NOT the leader), contribute to the discussion:
 - Question the leader's logic
 - Suggest alternative team compositions
 - Share your suspicions or defenses
-- Try to identify good vs evil players"""
+- Try to identify good vs evil players
+
+⚠️  IMPORTANT: You are NOT the leader for this quest. Player {quest_leader} is the leader.
+    DO NOT say "as the leader" or claim leadership. You are a participant."""
     
     return f"""🗣️  TEAM DISCUSSION - Quest {quest_number} ({role_text})
 

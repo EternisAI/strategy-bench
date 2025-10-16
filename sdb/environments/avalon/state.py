@@ -52,11 +52,20 @@ class AvalonState:
     current_proposal: Optional[TeamProposal] = None
     proposal_history: List[TeamProposal] = field(default_factory=list)
     team_rejections: int = 0
+    total_proposals: int = 0  # Global proposal counter (increments with each proposal)
     
     # Discussion tracking
     current_discussion: List[DiscussionStatement] = field(default_factory=list)
     discussion_order: List[int] = field(default_factory=list)  # Order players speak in
     next_speaker_index: int = 0  # Index in discussion_order for next speaker
+    
+    # Vote tracking (prevent double voting and track votes)
+    team_votes_cast: set = field(default_factory=set)  # Players who voted in current team voting
+    quest_votes_by_player: Dict[int, str] = field(default_factory=dict)  # player_id -> "success"/"fail"
+    quest_voters_done: set = field(default_factory=set)  # Players who completed quest voting
+    
+    # Discussion tracking (prevent repeated speaking)
+    spoken_this_round: set = field(default_factory=set)  # Players who spoke in current discussion round
     
     # Score tracking
     quests_succeeded: int = 0

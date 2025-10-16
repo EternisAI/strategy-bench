@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class Role(str, Enum):
@@ -103,6 +103,10 @@ class TeamProposal:
     approved: Optional[bool] = None
     approve_votes: int = 0
     reject_votes: int = 0
+    votes: Dict[int, str] = field(default_factory=dict)  # player_id -> "approve"/"reject"
+    quest_num: int = 0  # Which quest this proposal was for (0-4)
+    proposal_idx: int = 0  # Global proposal counter (1, 2, 3, ...)
+    round_idx: int = 0  # Proposal attempt within this quest (1, 2, 3, ...)
 
 
 # Quest configuration by player count
