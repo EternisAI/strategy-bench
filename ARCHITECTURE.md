@@ -1,10 +1,10 @@
-# 🏗️ Social Deduction Bench - Architecture
+# Strategy Bench - Architecture
 
-## 📊 Overview
+## Overview
 
-Social Deduction Bench (SDB) is a modular, extensible framework for benchmarking Large Language Models in social deduction games. This document describes the technical architecture, design patterns, and implementation details.
+Strategy Bench is a modular, extensible framework for benchmarking Large Language Models in strategic multi-party games. This document describes the technical architecture, design patterns, and implementation details.
 
-## 🎯 Design Principles
+## Design Principles
 
 ### 1. **Separation of Concerns**
 ```
@@ -41,7 +41,7 @@ Tournament/Evaluation (runs multiple games, analyzes results)
 
 ---
 
-## 📦 Core Components
+## Core Components
 
 ### 1. Core Framework (`sdb/core/`)
 
@@ -366,7 +366,7 @@ class GameLogger:
 
 ---
 
-## 🎮 Game Implementation: Secret Hitler
+## Game Implementation: Secret Hitler
 
 ### Architecture
 
@@ -493,7 +493,7 @@ class SecretHitlerEnv(BaseEnvironment):
 
 ---
 
-## 🔄 Data Flow
+## Data Flow
 
 ### 1. Game Initialization
 ```
@@ -532,7 +532,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 🧪 Testing Strategy
+## Testing Strategy
 
 ### Unit Tests
 - Core types and utilities
@@ -557,7 +557,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 📊 Performance Considerations
+## Performance Considerations
 
 ### LLM Calls
 - **Async**: All LLM calls are async for parallel execution
@@ -577,7 +577,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 🎨 Design Patterns
+## Design Patterns
 
 ### 1. Strategy Pattern
 - `BaseAgent` with multiple implementations (LLM, Random, Rule-based)
@@ -601,7 +601,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 🔌 Extension Points
+## Extension Points
 
 ### Adding a New Game
 
@@ -643,7 +643,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 📈 Metrics & Evaluation
+## Metrics & Evaluation
 
 ### Standard Metrics
 - Win rate by role/party
@@ -663,7 +663,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 🔍 File Statistics
+## File Statistics
 
 | Module | Files | Lines | Purpose |
 |--------|-------|-------|---------|
@@ -677,30 +677,7 @@ Environment.notify_agents(event_type, data)
 
 ---
 
-## 🚀 Future Enhancements
-
-### Short Term
-- ✅ Complete Secret Hitler
-- 🔄 Port Among Us
-- 🔄 Port Avalon
-- 🔄 Port Spyfall
-- 🔄 Port Werewolf
-
-### Medium Term
-- Tournament system with ELO ratings
-- Advanced evaluation metrics
-- Web-based replay viewer
-- Human-in-the-loop interface
-
-### Long Term
-- Search-based agents (MCTS, Strategist)
-- Multi-modal agents (vision + text)
-- Cross-game transfer learning
-- Adversarial agent training
-
----
-
-## 📝 Key Implementation Details
+## Key Implementation Details
 
 ### Secret Hitler Specifics
 

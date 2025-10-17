@@ -1,10 +1,14 @@
-# Social Deduction Bench (SDB)
+# Strategy Bench
 
-**Unified benchmark framework for evaluating Large Language Models in social deduction games**
+**A benchmark framework for evaluating Large Language Models in multi-agent social deduction games**
 
-## What is SDB?
+## What is Strategy Bench?
 
-Social Deduction Bench provides a production-ready platform for evaluating AI social intelligence through interactive games. Test LLMs on deception, strategic reasoning, and multi-agent coordination across multiple social deduction games with consistent interfaces.
+Strategy Bench is designed to test the exact capabilities personal AI will need when representing us in messy, multi-party settings and making decisions based on incomplete information. 
+
+The benchmark uses strategic games where agents take actions, communicate with each other, and make decisions based on their world model. We focus on games that combine asymmetric/incomplete information, multi-party interactions, and possible deceptive behavior that agents must account for before making decisions.
+
+This provides a crisp, high-signal way to evaluate how well AI agents can handle the complex social and strategic reasoning required in real-world scenarios when they represent human interests in the near future.
 
 ## Supported Games
 
@@ -219,7 +223,7 @@ Bluffing and negotiation game with goods inspection.
 
 ## Supported Models
 
-SDB uses **OpenRouter** to access multiple LLM providers:
+Strategy Bench uses **OpenRouter** to access multiple LLM providers:
 
 ### Recommended Models
 
@@ -456,16 +460,7 @@ This framework builds upon:
 - **Werewolf Arena** (Google) - Werewolf implementation
 - **Sheriff of Nottingham** - Bluffing and negotiation mechanics
 
-## Citation
 
-```bibtex
-@software{social_deduction_bench2025,
-  title={Social Deduction Bench: Unified Framework for LLMs in Social Deduction Games},
-  author={Social Deduction Bench Contributors},
-  year={2025},
-  url={https://github.com/yourusername/social-deduction-bench}
-}
-```
 
 ---
 
