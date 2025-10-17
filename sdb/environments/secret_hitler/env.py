@@ -145,7 +145,7 @@ class SecretHitlerEnv(BaseEnvironment):
         Returns:
             GameResult with outcome
         """
-        self.reset()
+        # Environment already initialized in __init__ (reset was called there)
         
         while not self.state.is_terminal:
             self._run_round()
@@ -881,6 +881,46 @@ class SecretHitlerEnv(BaseEnvironment):
     def get_win_reason(self):
         """Get win reason."""
         return self.state.metadata.get("win_reason")
+    
+    def _build_game_result(self):
+        """Build GameResult from current game state."""
+        from sdb.core.types import GameResult
+        
+        winner = self.get_winner() or "timeout"
+        win_reason = self.get_win_reason() or "Game ended"
+        
+        # Calculate player stats
+        player_stats = {}
+        for player_info in self.state.players:
+            pid = player_info.player_id
+            party = player_info.party
+            is_hitler = player_info.role == Role.HITLER
+            role = "hitler" if is_hitler else party.value
+            
+            # Winner is based on party
+            is_winner = (winner == "liberals" and party.value == "liberal") or \
+                       (winner == "fascists" and party.value == "fascist")
+            
+            player_stats[pid] = {
+                "score": 1.0 if is_winner else 0.0,
+                "party": party.value,
+                "role": role,
+                "survived": pid in self.state.alive_players,
+            }
+        
+        return GameResult(
+            game_id=self.game_id,
+            winner=winner,
+            win_reason=win_reason,
+            num_rounds=self.state.round_number,
+            duration_seconds=0.0,
+            player_stats=player_stats,
+            metadata={
+                "liberal_policies": self.state.liberal_policies,
+                "fascist_policies": self.state.fascist_policies,
+                "election_tracker": self.state.election_tracker,
+            }
+        )
 
 
 # Import for logging

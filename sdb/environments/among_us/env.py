@@ -183,15 +183,23 @@ class AmongUsEnv(BaseEnvironment):
         
         return self._get_observations()
     
-    def step(self, action: Action) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
+    def step(self, actions: Dict[int, Action]) -> Tuple[Dict[int, Observation], Dict[int, float], bool, Dict]:
         """Execute one step of the game."""
-        # Handle action based on phase
+        # Handle actions based on phase
+        for player_id, action in actions.items():
+            if self.state.phase == Phase.TASK:
+                # Store action without triggering resolution yet
+                self.pending_task_actions[action.player_id] = action
+            elif self.state.phase == Phase.DISCUSSION:
+                self._handle_discussion_action(action)
+            elif self.state.phase == Phase.VOTING:
+                self._handle_voting_action(action)
+        
+        # After all actions are stored, check if we should resolve
         if self.state.phase == Phase.TASK:
-            self._handle_task_action(action)
-        elif self.state.phase == Phase.DISCUSSION:
-            self._handle_discussion_action(action)
-        elif self.state.phase == Phase.VOTING:
-            self._handle_voting_action(action)
+            alive = self.state.get_alive_players()
+            if len(self.pending_task_actions) >= len(alive):
+                self._resolve_task_round()
         
         # Get observations
         observations = self._get_observations()
@@ -1004,6 +1012,7 @@ class AmongUsEnv(BaseEnvironment):
                 obs_type = "observe"
             
             obs_data["instruction"] = instruction
+            obs_data["type"] = obs_type  # Add obs_type to data for filtering in play_game()
             
             observations[pid] = Observation(
                 player_id=pid,
@@ -1013,4 +1022,100 @@ class AmongUsEnv(BaseEnvironment):
             )
         
         return observations
+    
+    async def play_game(self):
+        """Play a complete Among Us game with configured agents.
+        
+        Returns:
+            GameResult with winner, scores, and stats
+        """
+        import asyncio
+        from sdb.core.types import GameResult
+        
+        if not self.agents:
+            raise RuntimeError("No agents configured")
+        
+        # Environment already initialized in __init__ (reset was called there)
+        round_count = 0
+        max_rounds = 200  # Safety limit
+        
+        # Ensure state is initialized
+        if not hasattr(self, 'state') or self.state is None:
+            raise RuntimeError("State not initialized - reset() should have been called in __init__")
+        
+        while not self.state.winner and round_count < max_rounds:
+            round_count += 1
+            
+            # Get observations
+            obs = self._get_observations()
+            
+            # Collect players who need to act
+            act_players = [
+                (player_id, observation)
+                for player_id, observation in obs.items()
+                if observation.data.get("type") == "act" and observation.data.get("instruction")
+            ]
+            
+            # Call agents in parallel
+            actions = {}
+            if act_players:
+                tasks = []
+                for pid, observation in act_players:
+                    agent = self.agents[pid]
+                    # Check if agent has async method
+                    if hasattr(agent, 'act_async'):
+                        tasks.append(agent.act_async(observation))
+                    else:
+                        # Wrap sync call in coroutine
+                        async def sync_act(a, o):
+                            return a.act(o)
+                        tasks.append(sync_act(agent, observation))
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Collect successful actions
+                for (pid, _), result in zip(act_players, results):
+                    if not isinstance(result, Exception):
+                        actions[pid] = result
+            
+            # Step environment
+            if actions:
+                obs, rewards, done, info = self.step(actions)
+            
+            if self.state.winner:
+                break
+        
+        # Build result
+        winner = self.state.winner or "timeout"
+        win_reason = self.get_win_reason() or "Game reached maximum rounds"
+        
+        # Calculate player stats (scores for winners)
+        player_stats = {}
+        for player in self.state.players.values():
+            if self.state.winner == "crewmates":
+                score = 1.0 if player.role == "crewmate" else 0.0
+            elif self.state.winner == "impostors":
+                score = 1.0 if player.role == "impostor" else 0.0
+            else:  # timeout
+                score = 0.0
+            
+            player_stats[player.player_id] = {
+                "score": score,
+                "role": player.role,
+                "survived": player.is_alive,
+            }
+        
+        return GameResult(
+            game_id=self.game_id,
+            winner=winner,
+            win_reason=win_reason,
+            num_rounds=round_count,
+            duration_seconds=0.0,  # Could track this if needed
+            player_stats=player_stats,
+            metadata={
+                "kills": len([p for p in self.state.players.values() if not p.is_alive and p.location == "DEAD"]),
+                "meetings": len(self.state.meeting_results),
+                "tasks_completed": sum(p.tasks_completed for p in self.state.players.values()),
+            }
+        )
 

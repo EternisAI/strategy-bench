@@ -138,13 +138,10 @@ async def main():
                     from sdb.core.types import Action
                     actions[player_id] = Action(player_id=player_id, data={"type": "wait"})
         
-        # Step environment - Among Us expects one action at a time
+        # Step environment with all actions
         if actions:
             try:
-                for player_id, action in actions.items():
-                    obs, rewards, done, info = env.step(action)
-                    if done:
-                        break
+                obs, rewards, done, info = env.step(actions)
             except Exception as e:
                 print(f"  ⚠️  Step error: {str(e)}")
                 import traceback

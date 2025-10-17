@@ -957,4 +957,98 @@ Respond with JSON:
             )
         
         return observations
+    
+    async def play_game(self):
+        """Play a complete Spyfall game with configured agents.
+        
+        Returns:
+            GameResult with winner, scores, and stats
+        """
+        import asyncio
+        from sdb.core.types import GameResult
+        
+        if not self.agents:
+            raise RuntimeError("No agents configured")
+        
+        # Environment already initialized in __init__ (reset was called there)
+        round_count = 0
+        max_rounds = 100  # Safety limit
+        
+        while not self.state.winner and round_count < max_rounds:
+            round_count += 1
+            
+            # Get observations
+            obs = self._get_observations()
+            
+            # Collect players who need to act
+            act_players = [
+                (player_id, observation)
+                for player_id, observation in obs.items()
+                if observation.data.get("type") == "act" and observation.data.get("instruction")
+            ]
+            
+            # Call agents in parallel
+            actions = {}
+            if act_players:
+                tasks = []
+                for pid, observation in act_players:
+                    agent = self.agents[pid]
+                    # Check if agent has async method
+                    if hasattr(agent, 'act_async'):
+                        tasks.append(agent.act_async(observation))
+                    else:
+                        # Wrap sync call in coroutine
+                        async def sync_act(a, o):
+                            return a.act(o)
+                        tasks.append(sync_act(agent, observation))
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Collect successful actions
+                for (pid, _), result in zip(act_players, results):
+                    if not isinstance(result, Exception):
+                        actions[pid] = result
+            
+            # Step environment
+            if actions:
+                obs, rewards, done, info = self.step(actions)
+            
+            if self.state.winner:
+                break
+        
+        # Build result
+        winner = self.state.winner or "timeout"
+        win_reason = self.get_win_reason() or "Game reached maximum rounds"
+        
+        # Calculate player stats
+        player_stats = {}
+        spy_idx = self.state.spy_index
+        
+        for pid in range(self.game_config.n_players):
+            if self.state.winner == "spy":
+                score = 1.0 if pid == spy_idx else 0.0
+            elif self.state.winner == "non-spies":
+                score = 1.0 if pid != spy_idx else 0.0
+            else:  # timeout
+                score = 0.0
+            
+            player_stats[pid] = {
+                "score": score,
+                "is_spy": pid == spy_idx,
+            }
+        
+        return GameResult(
+            game_id=self.game_id,
+            winner=winner,
+            win_reason=win_reason,
+            num_rounds=round_count,
+            duration_seconds=0.0,
+            player_stats=player_stats,
+            metadata={
+                "spy_index": spy_idx,
+                "location": self.state.location,
+                "qa_exchanges": len(self.state.qa_history),
+                "accusations": len([e for e in self.state.qa_history if hasattr(e, 'type') and e.type == 'accusation']),
+            }
+        )
 

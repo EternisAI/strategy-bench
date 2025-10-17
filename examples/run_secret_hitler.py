@@ -78,11 +78,10 @@ def main():
     logger = GameLogger(output_dir=output_dir)
     print(f"\n📁 Logs will be saved to: {output_dir}/")
     
-    # Create environment
+    # Create environment (reset is called automatically in __init__)
     env = SecretHitlerEnv(agents=agents, config=config, logger=logger)
     
-    # Reset and show initial state
-    obs = env.reset()
+    # Show initial state
     print(f"\n🎲 Game Started!")
     print(f"\n👥 Roles:")
     for i, player in enumerate(env.state.players):

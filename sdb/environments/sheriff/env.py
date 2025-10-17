@@ -1123,7 +1123,8 @@ Strategy: Inspect suspicious players (big bribes, unusual declarations)!"""
         if not self.agents:
             raise RuntimeError("No agents configured")
         
-        obs = self.reset()
+        # Environment already initialized in __init__ (reset was called there)
+        obs = self._get_observations()
         done = False
         num_rounds = 0
         
@@ -1151,10 +1152,30 @@ Strategy: Inspect suspicious players (big bribes, unusual declarations)!"""
         st = self.state
         scores = calculate_final_scores(st.players, st.card_defs)
         
+        # Determine winner (player with highest score)
+        winner_pid = max(scores.items(), key=lambda x: x[1])[0] if scores else 0
+        winner_score = scores.get(winner_pid, 0)
+        
+        # Build player stats
+        player_stats = {}
+        for pid in range(st.config.n_players):
+            score = scores.get(pid, 0)
+            player_stats[pid] = {
+                "score": float(score),
+                "is_winner": pid == winner_pid,
+                "gold": st.players[pid].gold if pid < len(st.players) else 0,
+            }
+        
         return GameResult(
-            winner=st.winner,
+            game_id=self.game_id,
+            winner=f"Player {winner_pid}",
+            win_reason=f"Highest score: {winner_score} gold",
             num_rounds=num_rounds,
-            final_scores=scores,
-            players=[i for i in range(st.config.n_players)],
+            duration_seconds=0.0,
+            player_stats=player_stats,
+            metadata={
+                "final_scores": {str(k): v for k, v in scores.items()},
+                "rounds_completed": sum(st.rotation_counts) if hasattr(st, 'rotation_counts') else 0,
+            }
         )
 

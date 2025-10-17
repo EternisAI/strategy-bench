@@ -1,22 +1,21 @@
-# 🎮 Social Deduction Bench (SDB)
+# Social Deduction Bench (SDB)
 
 **Unified benchmark framework for evaluating Large Language Models in social deduction games**
 
-## 🎯 What is SDB?
+## What is SDB?
 
 Social Deduction Bench provides a production-ready platform for evaluating AI social intelligence through interactive games. Test LLMs on deception, strategic reasoning, and multi-agent coordination across multiple social deduction games with consistent interfaces.
 
-## 🎮 Supported Games
+## Supported Games
 
-- **Secret Hitler** ✅ - Political strategy with hidden roles, policies, and presidential powers
-- **Among Us** 🔄 - Sandbox for studying agentic deception
-- **Avalon** 🔄 - Multi-agent strategic reasoning with hidden roles
-- **Spyfall** 🔄 - Question-and-answer based social deduction
-- **Werewolf** 🔄 - Classic social deduction with night/day phases
+- **Secret Hitler** - Political strategy with hidden roles, policies, and presidential powers
+- **Among Us** - Spatial deduction with tasks, emergency meetings, and impostor kills
+- **Avalon** - Quest-based team building with hidden roles and assassination
+- **Spyfall** - Question-and-answer based location deduction
+- **Werewolf** - Classic social deduction with night/day phases and special roles
+- **Sheriff of Nottingham** - Bluffing and negotiation with goods inspection
 
-**Legend**: ✅ Complete | 🔄 In Progress
-
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Installation
 
@@ -41,34 +40,58 @@ echo "OPENROUTER_API_KEY=your_key_here" > .env
 
 ### 3. Run Your First Game
 
-#### Using the CLI
+#### Using the CLI (Recommended)
 
 ```bash
-# List available games
+# List all available games
 python scripts/sdb_cli.py list
 
-# Play Secret Hitler with 5 players
-python scripts/sdb_cli.py play secret_hitler --num-players 5
+# Play any game with default settings
+python scripts/sdb_cli.py play secret_hitler
+python scripts/sdb_cli.py play among_us
+python scripts/sdb_cli.py play avalon
 
-# Use a specific model
-python scripts/sdb_cli.py play secret_hitler --num-players 5 --model openai/gpt-4o
+# Customize game settings
+python scripts/sdb_cli.py play secret_hitler --num-players 7 --model anthropic/claude-3.5-sonnet
+python scripts/sdb_cli.py play werewolf --num-players 8 --temperature 0.9
 
-# Play with random agents (baseline)
-python scripts/sdb_cli.py play secret_hitler --num-players 7 --agent-type random
+# Use random agents for testing
+python scripts/sdb_cli.py play spyfall --agent-type random --num-players 6
+```
+
+#### Using Example Scripts
+
+```bash
+# Run Secret Hitler with 7 players
+python examples/run_secret_hitler.py
+
+# Run Among Us with 6 players
+python examples/run_among_us.py
+
+# Run Avalon with 5 players
+python examples/run_avalon.py
+
+# Run Spyfall
+python examples/run_spyfall.py
+
+# Run Werewolf
+python examples/run_werewolf.py
+
+# Run Sheriff of Nottingham
+python examples/run_sheriff.py
 ```
 
 #### Using Python API
 
 ```python
 from sdb.environments.secret_hitler import SecretHitlerEnv, SecretHitlerConfig
-from sdb.agents.llm import OpenRouterAgent
-from sdb.logging import GameLogger
+from sdb.agents.llm.openrouter_agent import OpenRouterAgent
+from sdb.logging.game_logger import GameLogger
 
 # Create agents
 agents = [
     OpenRouterAgent(
-        player_id=i, 
-        name=f"Agent_{i}",
+        player_id=i,
         model="openai/gpt-4o-mini",
         temperature=0.7,
         memory_capacity=50
@@ -78,72 +101,123 @@ agents = [
 
 # Configure game
 config = SecretHitlerConfig(n_players=5, log_private_info=True)
-logger = GameLogger(game_id="my_game", output_dir="experiments/my_games")
+logger = GameLogger(output_dir="experiments/my_games")
 
 # Run game
 env = SecretHitlerEnv(agents=agents, config=config, logger=logger)
-result = env.play_game()
+result = env.run()
 
-print(f"🏆 Winner: {result.winner}")
-print(f"📋 Reason: {result.win_reason}")
-print(f"🔢 Rounds: {result.num_rounds}")
-print(f"📊 Log: {logger.get_log_file()}")
+print(f"Winner: {result.winner}")
+print(f"Reason: {result.win_reason}")
+print(f"Rounds: {result.num_rounds}")
 ```
 
-## 📊 Running Tournaments
+## Configuration
 
-```bash
-# Run a tournament with 10 games
-python scripts/sdb_cli.py tournament secret_hitler \
-  --name my_tournament \
-  --num-games 10 \
-  --num-players 5 \
-  --output-dir tournaments/my_tournament
+All games can be configured via YAML files in the `configs/` directory:
 
-# Evaluate results
-python scripts/sdb_cli.py evaluate \
-  tournaments/my_tournament/result.json \
-  --output tournaments/my_tournament/metrics.json
+- `configs/secret_hitler.yaml` - Secret Hitler settings
+- `configs/among_us.yaml` - Among Us settings
+- `configs/avalon.yaml` - Avalon settings
+- `configs/spyfall.yaml` - Spyfall settings
+- `configs/werewolf.yaml` - Werewolf settings
+- `configs/sheriff.yaml` - Sheriff of Nottingham settings
 
-# Create visualizations
-python scripts/sdb_cli.py visualize \
-  --tournament tournaments/my_tournament/result.json \
-  --metrics tournaments/my_tournament/metrics.json \
-  --output-dir tournaments/my_tournament/viz
+Example configuration:
+
+```yaml
+# Game configuration
+n_players: 7
+n_impostors: 2
+max_task_rounds: 50
+discussion_rounds: 2
+
+# LLM Agent Settings
+agent:
+  model: "anthropic/claude-3.5-sonnet"
+  temperature: 0.8
+  memory_capacity: 35
+
+# Logging
+logging:
+  enabled: true
+  output_dir: "experiments/my_game"
+  log_private: false
 ```
 
-## 🎮 Game-Specific Examples
+## Game-Specific Features
 
 ### Secret Hitler
 
-Secret Hitler is a social deduction game where Liberals try to enact 5 Liberal policies or assassinate Hitler, while Fascists try to enact 6 Fascist policies or elect Hitler as Chancellor after 3 Fascist policies are enacted.
+Political strategy game where Liberals try to enact 5 Liberal policies or assassinate Hitler, while Fascists try to enact 6 Fascist policies or elect Hitler as Chancellor.
 
-```python
-from sdb.environments.secret_hitler import SecretHitlerEnv, SecretHitlerConfig
-from sdb.agents.llm import OpenRouterAgent
+**Features:**
+- Full game mechanics (nomination, voting, legislative session, presidential powers)
+- Veto power (unlocks after 5 Fascist policies)
+- Discussion phases (public deliberation before votes)
+- Memory integration (agents remember all discussions and events)
+- Belief tracking (agents build models of other players)
 
-# Create 5-10 players
-agents = [OpenRouterAgent(player_id=i, name=f"Player_{i}") for i in range(7)]
+### Among Us
 
-# Configure with custom settings
-config = SecretHitlerConfig(
-    n_players=7,
-    seed=42,  # For reproducibility
-    log_private_info=True  # Log hidden information for analysis
-)
+Spatial deduction game with impostors and crewmates on a spaceship.
 
-env = SecretHitlerEnv(agents=agents, config=config)
-result = env.play_game()
-```
+**Features:**
+- Two-phase round resolution (deterministic, order-independent)
+- Spatial map system (14 rooms with corridor connections)
+- Movement and vent systems
+- Task completion and progress tracking
+- Emergency meetings and body reporting
+- Discussion and voting mechanics
+- Kill cooldowns and proper ejection handling
 
-**Key Features:**
-- ✅ Full game mechanics (nomination, voting, legislative session, presidential powers)
-- ✅ Veto power (unlocks after 5 Fascist policies)
-- ✅ Discussion phases (public deliberation before votes)
-- ✅ Memory integration (agents remember all discussions and events)
-- ✅ Belief tracking (agents build models of other players)
+### Avalon
 
-## 🤖 Supported Models
+Quest-based team building with hidden roles.
+
+**Features:**
+- Team proposal and voting system
+- Quest success/fail mechanics
+- Assassination phase for Evil team
+- Special roles (Merlin, Assassin)
+- Pre-proposal discussion
+- Proper round and proposal tracking
+
+### Spyfall
+
+Question-and-answer based location deduction.
+
+**Features:**
+- Turn-based Q&A system
+- Location-based questioning
+- Spy final guess mechanic
+- Accusation and voting system
+- Time limits and turn tracking
+
+### Werewolf
+
+Classic social deduction with night/day phases.
+
+**Features:**
+- Night phase (Werewolf kills, Doctor saves, Seer investigates)
+- Day phase (Discussion and voting)
+- Majority voting system
+- Special role powers
+- Proper phase transitions
+
+### Sheriff of Nottingham
+
+Bluffing and negotiation game with goods inspection.
+
+**Features:**
+- Market phase (card drawing)
+- Loading phase (bag preparation)
+- Declaration phase
+- Negotiation phase (multi-round)
+- Inspection phase with penalties
+- Royal goods and contraband
+
+## Supported Models
 
 SDB uses **OpenRouter** to access multiple LLM providers:
 
@@ -151,21 +225,21 @@ SDB uses **OpenRouter** to access multiple LLM providers:
 
 ```bash
 # OpenAI
---model openai/gpt-4o          # Best performance
---model openai/gpt-4o-mini     # Fast & cheap (default)
---model openai/gpt-4-turbo     # Good balance
+openai/gpt-4o              # Best performance
+openai/gpt-4o-mini         # Fast & cheap (default)
+openai/gpt-4-turbo         # Good balance
 
 # Anthropic
---model anthropic/claude-opus-4.1     # High reasoning
---model anthropic/claude-sonnet-3.5   # Balanced
---model anthropic/claude-haiku        # Fast
+anthropic/claude-opus-4.1      # High reasoning
+anthropic/claude-3.5-sonnet    # Balanced (recommended)
+anthropic/claude-haiku         # Fast
 
 # Google
---model google/gemini-2.5-pro    # Best Gemini
---model google/gemini-1.5-flash  # Fast Gemini
+google/gemini-2.5-pro      # Best Gemini
+google/gemini-1.5-flash    # Fast Gemini
 
 # Meta
---model meta/llama-3.1-405b      # Open source
+meta/llama-3.1-405b        # Open source
 ```
 
 ### Cost Optimization
@@ -178,194 +252,211 @@ agent = OpenRouterAgent(
     temperature=0.7,
     max_tokens=1024  # Limit response length
 )
-
-# Monitor costs
-stats = agent.get_stats()
-print(f"Total cost: ${stats['llm_stats']['total_cost']:.2f}")
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 social-deduction-bench/
-├── sdb/                      # Main package
-│   ├── core/                # Base classes & interfaces
-│   ├── agents/              # Agent implementations
-│   │   ├── llm/            # LLM agents (OpenRouter)
-│   │   └── baselines/      # Random, rule-based agents
-│   ├── environments/        # Game implementations
-│   │   ├── secret_hitler/  # ✅ Complete
-│   │   ├── among_us/       # 🔄 In progress
-│   │   └── ...
-│   ├── memory/             # Memory & belief tracking
-│   ├── llm_interface/      # LLM API clients
-│   ├── tournament/         # Tournament framework
-│   ├── evaluation/         # Metrics & evaluation
-│   ├── logging/            # Logging system
-│   └── analysis/           # Analysis & visualization
-├── scripts/                # CLI entry points
-│   └── sdb_cli.py         # Main CLI
-├── configs/                # Configuration files
-├── experiments/            # Experiment outputs
-└── tests/                  # Unit tests
+├── sdb/                        # Main package
+│   ├── core/                   # Base classes & interfaces
+│   │   ├── base_env.py        # BaseEnvironment class
+│   │   └── types.py           # Core types (Action, Observation, etc.)
+│   ├── agents/                 # Agent implementations
+│   │   └── llm/               # LLM agents (OpenRouter)
+│   │       └── openrouter_agent.py
+│   ├── environments/           # Game implementations
+│   │   ├── secret_hitler/     # Secret Hitler game
+│   │   ├── among_us/          # Among Us game
+│   │   ├── avalon/            # Avalon game
+│   │   ├── spyfall/           # Spyfall game
+│   │   ├── werewolf/          # Werewolf game
+│   │   └── sheriff/           # Sheriff of Nottingham
+│   ├── memory/                # Memory & belief tracking
+│   ├── logging/               # Logging system
+│   └── llm_interface/         # LLM API clients
+├── examples/                   # Example scripts
+│   ├── run_secret_hitler.py
+│   ├── run_among_us.py
+│   ├── run_avalon.py
+│   ├── run_spyfall.py
+│   ├── run_werewolf.py
+│   └── run_sheriff.py
+├── configs/                    # YAML configuration files
+├── experiments/                # Experiment outputs
+└── tests/                      # Unit tests
 ```
 
-## 🔧 Configuration
-
-### Game Configuration
-
-```python
-from sdb.environments.secret_hitler import SecretHitlerConfig
-
-config = SecretHitlerConfig(
-    n_players=7,
-    seed=42,                    # Reproducibility
-    log_private_info=True,      # Log hidden info for analysis
-)
-```
-
-### Agent Configuration
-
-```python
-from sdb.agents.llm import OpenRouterAgent
-
-agent = OpenRouterAgent(
-    player_id=0,
-    name="Strategic_Player",
-    model="openai/gpt-4o-mini",
-    temperature=0.7,             # Randomness (0=deterministic, 1=creative)
-    memory_capacity=50,          # Number of events to remember
-    max_tokens=2048,            # Max response length
-)
-```
-
-## 📊 Analyzing Results
+## Analyzing Results
 
 ### View Game Logs
+
+All games generate JSONL logs with detailed event information:
 
 ```python
 import json
 
 # Load game log
-with open("experiments/my_game/secret_hitler_cli.jsonl") as f:
+with open("experiments/my_game/game_xyz.jsonl") as f:
     events = [json.loads(line) for line in f]
 
 # Filter specific events
 discussions = [e for e in events if e["event_type"] == "DISCUSSION"]
 votes = [e for e in events if e["event_type"] == "VOTE_CAST"]
+actions = [e for e in events if e["event_type"] == "PLAYER_ACTION"]
 
-# Analyze agent reasoning
+# Analyze game flow
 for event in events:
-    if event["event_type"] == "AGENT_REASONING":
-        print(f"Player {event['data']['player_id']}: {event['data']['reasoning']}")
+    print(f"{event['timestamp']}: {event['event_type']}")
 ```
 
-### Extract Metrics
+### Log Event Types
 
-```bash
-# Get win rates, deception metrics, etc.
-python scripts/sdb_cli.py evaluate \
-  experiments/my_tournament/result.json \
-  --output experiments/my_tournament/metrics.json
-```
+Common event types across all games:
+- `GAME_START` - Game initialization
+- `PHASE_CHANGE` - Phase transitions
+- `PLAYER_ACTION` - Player actions
+- `DISCUSSION` - Discussion statements
+- `VOTE_CAST` - Vote events
+- `ELECTION_RESULT` - Voting outcomes
+- `PLAYER_ELIMINATED` - Player eliminations
+- `GAME_END` - Game conclusion
+- `ERROR` - Error events with error codes
 
-## 🎓 Key Features
+## Key Features
 
-### 1. **Memory-Aware Agents**
+### 1. Memory-Aware Agents
+
 Agents maintain:
 - **Short-term memory**: Recent events and observations
 - **Belief tracking**: Probabilistic models of other players
 - **Discussion memory**: All public statements from all players
 
-### 2. **Comprehensive Logging**
+### 2. Comprehensive Logging
+
 Every game event is logged:
 - Player actions and reasoning
 - Public discussions
 - Private information (role assignments, investigations)
 - Game state transitions
+- Error events with detailed error codes
 
-### 3. **Reproducibility**
-- Seed-based randomness
-- Deterministic game flow
-- Complete event replay from logs
+### 3. Generic Agent Design
 
-### 4. **Cost Tracking**
-- Automatic token counting
-- Cost estimation per game
-- Provider-specific pricing
+- LLM agents are completely game-agnostic
+- All game-specific prompts and actions are in environment folders
+- Observations include `instruction` field with formatted context
+- Hybrid memory: agents maintain short-term memory, games provide full history
 
-## 🛠️ Advanced Usage
+### 4. Robust Error Handling
 
-### Custom Agent Behavior
+- Structured error codes (e.g., `INVALID_TARGET_ID`, `KILL_ON_COOLDOWN`)
+- Last error tracking for agent self-correction
+- JSON parse retries with increased token limits
+- Fallback to safe actions on failures
 
-```python
-class MyCustomAgent(OpenRouterAgent):
-    def _build_system_prompt(self):
-        return """You are a highly strategic player.
-        Always consider:
-        1. Other players' past actions
-        2. Probability of hidden roles
-        3. Long-term consequences
-        """
-    
-    def notify(self, event_type, data):
-        super().notify(event_type, data)
-        # Custom logic when receiving events
-        if event_type == "discussion_statement":
-            # Analyze what others say
-            self._analyze_statement(data)
+### 5. Action Validation
+
+- Phase-based action gating
+- Explicit action choices provided to agents
+- Player directory with ID-to-name mapping
+- Prevention of duplicate votes and invalid actions
+
+## Advanced Features
+
+### Two-Phase Resolution (Among Us)
+
+Among Us implements deterministic, order-independent action resolution:
+1. Snapshot all positions at round start
+2. Resolve kills based on pre-move positions
+3. Apply movements for survivors
+4. Process body reports and meetings
+
+This prevents order-dependent kill failures and ensures fair gameplay.
+
+### Discussion Rounds (Multiple Games)
+
+Games track discussion rounds properly:
+- Each player speaks once per round
+- Rounds advance when all alive players have spoken
+- Duplicate detection prevents repetitive statements
+- Phase automatically advances after configured rounds
+
+### Voting Systems
+
+Different voting mechanics per game:
+- **Secret Hitler**: Simple majority for governments
+- **Werewolf**: Majority required for elimination
+- **Avalon**: Team approval requires majority, quest voting is anonymous
+- **Among Us**: Plurality voting for ejections
+- **Spyfall**: Majority required for accusations
+
+## Testing Games
+
+Each game includes an example script in the `examples/` directory. To test:
+
+```bash
+# Test Secret Hitler
+python examples/run_secret_hitler.py
+
+# Test Among Us
+python examples/run_among_us.py
+
+# Test Avalon
+python examples/run_avalon.py
+
+# Test Spyfall
+python examples/run_spyfall.py
+
+# Test Werewolf
+python examples/run_werewolf.py
+
+# Test Sheriff of Nottingham
+python examples/run_sheriff.py
 ```
 
-### Parallel Games
+Logs will be saved to `experiments/<game_name>/` by default.
 
-```python
-import asyncio
-
-async def run_multiple_games():
-    games = [create_game() for _ in range(10)]
-    results = await asyncio.gather(*[game.play_game_async() for game in games])
-    return results
-
-results = asyncio.run(run_multiple_games())
-```
-
-## 📖 Documentation
+## Documentation
 
 - **Architecture**: See `ARCHITECTURE.md` for technical details
-- **API Reference**: See inline docstrings
-- **Examples**: See `experiments/` directory
+- **API Reference**: See inline docstrings in source code
+- **Game Rules**: Each game environment has its own `rules.py` file
+- **Fix Logs**: See `AMONG_US_FIXES.md` and `SHERIFF_ALL_FIXES.md` for detailed implementation notes
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! To add a new game:
 
 1. Create game directory in `sdb/environments/your_game/`
-2. Implement `BaseEnvironment` interface
-3. Add configuration and rules
-4. Write tests
-5. Submit PR
+2. Implement required files:
+   - `env.py` - Main environment (inherit from `BaseEnvironment`)
+   - `state.py` - Game state management
+   - `config.py` - Configuration dataclass
+   - `types.py` - Game-specific types
+   - `rules.py` - Rule validation functions
+3. Add configuration YAML in `configs/your_game.yaml`
+4. Create example script in `examples/run_your_game.py`
+5. Write tests
+6. Submit PR
 
 See `ARCHITECTURE.md` for detailed implementation guide.
 
-## 📄 License
+## License
 
 MIT License - See [LICENSE](LICENSE) for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 This framework builds upon:
+- **Secret Hitler** - Original game by Mike Boxleiter, Tommy Maranges, Max Temkin
 - **AmongAgents** - Among Us implementation
 - **AvalonBench & Strategist** (ICLR 2025) - Avalon with search agents
-- **Secret Hitler** - Original game mechanics
-- **Spyfall** - Tournament system
+- **Spyfall** - Question-based deduction mechanics
 - **Werewolf Arena** (Google) - Werewolf implementation
+- **Sheriff of Nottingham** - Bluffing and negotiation mechanics
 
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/yourusername/social-deduction-bench/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/social-deduction-bench/discussions)
-
-## 📚 Citation
+## Citation
 
 ```bibtex
 @software{social_deduction_bench2025,
@@ -378,6 +469,4 @@ This framework builds upon:
 
 ---
 
-**Status**: Secret Hitler ✅ Complete | Other games 🔄 In Progress
-
-For technical architecture details, see [`ARCHITECTURE.md`](ARCHITECTURE.md)
+For technical architecture details, see `ARCHITECTURE.md`

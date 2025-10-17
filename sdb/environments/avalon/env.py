@@ -1142,7 +1142,8 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         if not self.agents:
             raise RuntimeError("No agents configured")
         
-        obs = self.reset()
+        # Get initial observations (reset was already called in __init__)
+        obs = self._get_observations()
         done = False
         num_rounds = 0
         
@@ -1156,6 +1157,14 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                 # Only quest leader acts
                 agent = self.agents[st.quest_leader]
                 actions[st.quest_leader] = agent.act(obs[st.quest_leader])
+            
+            elif st.current_phase == Phase.TEAM_DISCUSSION:
+                # All players can discuss
+                for pid in range(self.game_config.n_players):
+                    # Check if this player has spoken this round
+                    if pid not in st.spoken_this_round:
+                        agent = self.agents[pid]
+                        actions[pid] = agent.act(obs[pid])
             
             elif st.current_phase == Phase.TEAM_VOTING:
                 # All players vote
@@ -1183,16 +1192,29 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         # Create result
         st = self.state
         winner = st.winner.value if st.winner else None
+        win_reason = self.get_win_reason() if st.winner else "Game reached maximum rounds"
         
-        # Calculate scores (1.0 for winners, 0.0 for losers)
-        scores = {}
+        # Calculate player stats
+        player_stats = {}
         for player in st.players:
-            scores[player.pid] = 1.0 if player.team == st.winner else 0.0
+            score = 1.0 if player.team == st.winner else 0.0
+            player_stats[player.pid] = {
+                "score": score,
+                "team": player.team.value if player.team else "unknown",
+                "role": player.role.value if player.role else "unknown",
+            }
         
         return GameResult(
+            game_id=self.game_id,
             winner=winner,
+            win_reason=win_reason,
             num_rounds=num_rounds,
-            final_scores=scores,
-            players=[i for i in range(self.game_config.n_players)],
+            duration_seconds=0.0,
+            player_stats=player_stats,
+            metadata={
+                "quests_succeeded": st.quests_succeeded,
+                "quests_failed": st.quests_failed,
+                "total_proposals": st.total_proposals if hasattr(st, 'total_proposals') else 0,
+            }
         )
 
