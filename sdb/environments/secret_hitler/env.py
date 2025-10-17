@@ -86,7 +86,44 @@ class SecretHitlerEnv(BaseEnvironment):
             president_idx=self.rng.randint(0, self.num_players - 1)
         )
         
-        self.logger.log_game_start({"config": self.config, "roles": [r.name for r in roles]})
+        self.logger.log_game_start({"config": self.config})
+        
+        # Log role assignments (private)
+        if self.logger:
+            self.logger.log(
+                event_type=EventType.PLAYER_ACTION,
+                data={
+                    "action": "role_assignment",
+                    "roles": [r.name for r in roles],
+                    "role_map": {str(i): r.name for i, r in enumerate(roles)}
+                },
+                is_private=True
+            )
+            
+            # Log agent metadata including model information
+            agent_metadata = {}
+            for i, agent in enumerate(self.agents):
+                agent_info = {
+                    "name": agent.name if hasattr(agent, 'name') else f"Agent_{i}",
+                    "type": agent.__class__.__name__,
+                }
+                # Add model information if available
+                if hasattr(agent, 'llm_client') and hasattr(agent.llm_client, 'model'):
+                    agent_info["model"] = agent.llm_client.model
+                elif hasattr(agent, 'model'):
+                    agent_info["model"] = agent.model
+                elif hasattr(agent, 'config') and hasattr(agent.config, 'model'):
+                    agent_info["model"] = agent.config.model
+                agent_metadata[str(i)] = agent_info
+            
+            self.logger.log(
+                event_type=EventType.GAME_START,
+                data={
+                    "action": "agent_metadata",
+                    "agents": agent_metadata
+                },
+                is_private=True
+            )
         
         # Notify agents of their roles
         for agent in self.agents:

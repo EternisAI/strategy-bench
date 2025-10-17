@@ -25,10 +25,10 @@ class AmongUsConfig:
     """
     n_players: int = 7
     n_impostors: int = 2
-    tasks_per_player: int = 3
-    max_task_rounds: int = 50  # Match original (was 20)
-    discussion_rounds: int = 3  # Match original (was max_discussion_rounds: 10)
-    emergency_meetings: int = 1  # Per player
+    tasks_per_player: int = 4
+    max_task_rounds: int = 100  # Match original (was 20)
+    discussion_rounds: int = 5  # Match original (was max_discussion_rounds: 10)
+    emergency_meetings: int = 2  # Per player
     kill_cooldown: int = 3  # Match original (was 2)
     
     def __post_init__(self):

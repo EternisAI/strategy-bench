@@ -177,8 +177,43 @@ class AmongUsEnv(BaseEnvironment):
                 data={
                     "n_players": self.game_config.n_players,
                     "n_impostors": self.game_config.n_impostors,
-                    "roles": [r.value for r in roles],
                 }
+            )
+            
+            # Log role assignments (private)
+            self.logger.log(
+                event_type=EventType.PLAYER_ACTION,
+                data={
+                    "action": "role_assignment",
+                    "roles": [r.value for r in roles],
+                    "role_map": {str(i): r.value for i, r in enumerate(roles)}
+                },
+                is_private=True
+            )
+            
+            # Log agent metadata including model information
+            agent_metadata = {}
+            for i, agent in enumerate(self.agents):
+                agent_info = {
+                    "name": agent.name,
+                    "type": agent.__class__.__name__,
+                }
+                # Add model information if available
+                if hasattr(agent, 'llm_client') and hasattr(agent.llm_client, 'model'):
+                    agent_info["model"] = agent.llm_client.model
+                elif hasattr(agent, 'model'):
+                    agent_info["model"] = agent.model
+                elif hasattr(agent, 'config') and hasattr(agent.config, 'model'):
+                    agent_info["model"] = agent.config.model
+                agent_metadata[str(i)] = agent_info
+            
+            self.logger.log(
+                event_type=EventType.GAME_START,
+                data={
+                    "action": "agent_metadata",
+                    "agents": agent_metadata
+                },
+                is_private=True
             )
         
         return self._get_observations()
@@ -1020,6 +1055,19 @@ class AmongUsEnv(BaseEnvironment):
                 phase=self.state.phase.value,
                 data=obs_data
             )
+            
+            # Log private observations for each player
+            if self.logger:
+                self.logger.log(
+                    event_type=EventType.INFO,
+                    data={
+                        "round": self.state.round_number,
+                        "player_id": pid,
+                        "observation": obs_data,
+                    },
+                    player_id=pid,
+                    is_private=True
+                )
         
         return observations
     

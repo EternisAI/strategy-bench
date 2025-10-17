@@ -109,6 +109,31 @@ class SheriffEnv(BaseEnvironment):
                     "deck_size": len(card_ids),
                 }
             )
+            
+            # Log agent metadata including model information
+            agent_metadata = {}
+            for i, agent in enumerate(self.agents):
+                agent_info = {
+                    "name": agent.name,
+                    "type": agent.__class__.__name__,
+                }
+                # Add model information if available
+                if hasattr(agent, 'llm_client') and hasattr(agent.llm_client, 'model'):
+                    agent_info["model"] = agent.llm_client.model
+                elif hasattr(agent, 'model'):
+                    agent_info["model"] = agent.model
+                elif hasattr(agent, 'config') and hasattr(agent.config, 'model'):
+                    agent_info["model"] = agent.config.model
+                agent_metadata[str(i)] = agent_info
+            
+            self.logger.log(
+                EventType.GAME_START,
+                data={
+                    "action": "agent_metadata",
+                    "agents": agent_metadata
+                },
+                is_private=True
+            )
         
         return self._get_observations()
 
