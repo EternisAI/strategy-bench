@@ -321,8 +321,8 @@ def cmd_play_game(args):
     
     # Setup logging
     output_dir = Path(args.output_dir or logging_settings.get('output_dir', f'experiments/{game_name}_cli'))
-    logger = GameLogger(output_dir=output_dir)
-    print(f"  • Logs: {output_dir}/")
+    logger = GameLogger(output_dir=output_dir, log_private=True)
+    print(f"  • Logs: {output_dir}/ (including private info)")
     
     # Import and create environment
     module = __import__(game_info["env_module"], fromlist=[game_info["env_class"]])

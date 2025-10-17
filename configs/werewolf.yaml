@@ -27,5 +27,5 @@ agent:
 logging:
   enabled: true
   output_dir: "experiments/werewolf"
-  log_private: false
+  log_private: true  # Save private info (roles, observations) for analysis
 

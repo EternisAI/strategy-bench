@@ -26,5 +26,5 @@ agent:
 logging:
   enabled: true
   output_dir: "experiments/avalon"
-  log_private: false      # Don't log private information (roles, etc.)
+  log_private: true  # Save private info (roles, observations) for analysis
 

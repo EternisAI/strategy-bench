@@ -1,0 +1,66 @@
+# Tournament Configuration Example
+
+tournament:
+  name: "LLM Comparison Tournament"
+  type: round_robin  # round_robin or swiss
+  num_games: 20
+  output_dir: tournaments/llm_comparison
+  seed: 42
+
+environment:
+  name: secret_hitler
+  num_players: 5
+
+# Define multiple agent configurations to compare
+agents:
+  - id: 0
+    name: "GPT4_Mini"
+    type: llm
+    model: openai/gpt-4o-mini
+    temperature: 0.7
+    max_tokens: 512
+  
+  - id: 1
+    name: "GPT4"
+    type: llm
+    model: openai/gpt-4o
+    temperature: 0.7
+    max_tokens: 512
+  
+  - id: 2
+    name: "Claude_Sonnet"
+    type: llm
+    model: anthropic/claude-3.5-sonnet
+    temperature: 0.7
+    max_tokens: 512
+  
+  - id: 3
+    name: "Gemini"
+    type: llm
+    model: google/gemini-pro-1.5
+    temperature: 0.7
+    max_tokens: 512
+  
+  - id: 4
+    name: "Random_Baseline"
+    type: random
+
+# Evaluation settings
+evaluation:
+  metrics:
+    - win_rate
+    - deception_success
+    - accusation_accuracy
+    - communication_effectiveness
+  
+  output: tournaments/llm_comparison/metrics.json
+
+# Visualization settings
+visualization:
+  enabled: true
+  output_dir: tournaments/llm_comparison/visualizations
+  plots:
+    - win_rates
+    - deception_analysis
+    - game_length_distribution
+

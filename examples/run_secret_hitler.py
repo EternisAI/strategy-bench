@@ -75,8 +75,8 @@ def main():
     else:
         output_dir = Path("experiments/secret_hitler_example")
     
-    logger = GameLogger(output_dir=output_dir)
-    print(f"\n📁 Logs will be saved to: {output_dir}/")
+    logger = GameLogger(output_dir=output_dir, log_private=True)
+    print(f"\n📁 Logs will be saved to: {output_dir}/ (including private info)")
     
     # Create environment (reset is called automatically in __init__)
     env = SecretHitlerEnv(agents=agents, config=config, logger=logger)

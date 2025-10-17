@@ -34,5 +34,5 @@ emergency_meetings: 1      # Number of emergency meetings per player
 logging:
   enabled: true
   output_dir: "experiments/among_us"
-  log_private: false
+  log_private: true  # Save private info (roles, observations) for analysis
 

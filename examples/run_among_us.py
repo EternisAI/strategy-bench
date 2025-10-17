@@ -72,8 +72,8 @@ async def main():
     # Setup logging from YAML config
     logging_config = yaml_config.get('logging', {})
     output_dir = Path(logging_config.get('output_dir', 'experiments/among_us'))
-    logger = GameLogger(output_dir=output_dir)
-    print(f"\n📁 Logs will be saved to: {output_dir}/")
+    logger = GameLogger(output_dir=output_dir, log_private=True)
+    print(f"\n📁 Logs will be saved to: {output_dir}/ (including private info)")
     
     # Create environment (reset is called automatically in __init__)
     env = AmongUsEnv(agents=agents, config=config, logger=logger)

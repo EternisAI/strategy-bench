@@ -27,5 +27,5 @@ agent:
 logging:
   enabled: true
   output_dir: "experiments/spyfall"
-  log_private: false
+  log_private: true
 

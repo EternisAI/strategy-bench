@@ -20,7 +20,7 @@ class GameLogger:
         self,
         game_id: Optional[str] = None,
         output_dir: Optional[Path] = None,
-        log_private: bool = False,
+        log_private: bool = True,
         enabled: bool = True,
     ):
         """Initialize game logger.
@@ -28,7 +28,7 @@ class GameLogger:
         Args:
             game_id: Unique game identifier
             output_dir: Directory to save logs (None for memory-only)
-            log_private: Whether to log private information
+            log_private: Whether to log private information (default: True)
             enabled: Whether logging is enabled
         """
         self.game_id = game_id or generate_game_id()

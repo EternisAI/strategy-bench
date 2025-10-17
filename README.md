@@ -105,7 +105,7 @@ agents = [
 
 # Configure game
 config = SecretHitlerConfig(n_players=5, log_private_info=True)
-logger = GameLogger(output_dir="experiments/my_games")
+logger = GameLogger(output_dir="experiments/my_games", log_private=True)
 
 # Run game
 env = SecretHitlerEnv(agents=agents, config=config, logger=logger)
@@ -146,7 +146,7 @@ agent:
 logging:
   enabled: true
   output_dir: "experiments/my_game"
-  log_private: false
+  log_private: true  # Save private info (roles, observations) - recommended for analysis
 ```
 
 ## Game-Specific Features
