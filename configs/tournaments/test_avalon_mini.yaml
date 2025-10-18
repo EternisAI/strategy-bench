@@ -1,0 +1,50 @@
+# Mini Avalon Tournament for Testing (3 games only)
+name: "Avalon Mini Test Tournament"
+game: "avalon"
+
+# Game-specific settings
+game_config:
+  n_players: 5  # 5 players: 3 good, 2 evil
+  seed: null
+  include_merlin: true
+  include_percival: false
+  include_morgana: false
+  include_mordred: false
+  include_oberon: false
+
+# Schedule file
+schedule_file: "configs/tournaments/test_avalon_mini_schedule.csv"
+schedule_format: "avalon"  # Format: game_id,players,good,evil
+
+# Output settings
+output_dir: "experiments/tournaments/test_avalon_mini"
+log_games: true
+log_private_info: true
+
+# Execution settings
+max_concurrent_games: 3  # Run all games in parallel
+timeout_per_game: 1800  # 30 minutes max per game
+
+# Model name mappings
+model_mapping:
+  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  gpt-4o: "openai/gpt-4o"
+  gpt-5: "openai/gpt-5"
+
+# Agent settings
+agent_config:
+  type: "OpenRouterAgent"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 60
+
+# Metrics to track
+metrics:
+  - "win_rate"
+  - "good_win_rate"
+  - "evil_win_rate"
+  - "mission_success_rate"
+  - "team_proposal_success_rate"
+  - "assassination_success_rate"
+
+

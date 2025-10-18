@@ -1,0 +1,54 @@
+# Spyfall Tournament Configuration
+name: "Spyfall Tournament"
+game: "spyfall"
+
+# Game-specific settings
+game_config:
+  n_players: 8  # Total players (will be overridden by schedule)
+  max_rounds: 8
+  questions_per_round: 1
+  enable_location_guessing: true
+  time_limit_minutes: null
+
+# Schedule file (CSV with role assignments)
+schedule_file: "configs/tournaments/spyfall_tournament_schedule.csv"
+schedule_format: "spyfall"  # Format: game_id,players,spy
+
+# Output settings
+output_dir: "experiments/tournaments/spyfall"
+log_games: true
+log_private_info: true
+
+# Execution settings
+max_concurrent_games: 3
+timeout_per_game: 3600  # seconds (1 hour)
+
+# Model name mappings
+model_mapping:
+  claude-opus-4.1: "anthropic/claude-opus-4.1"
+  claude-opus-4: "anthropic/claude-opus-4"
+  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  gpt-5: "openai/gpt-5"
+  gpt-4o: "openai/gpt-4o"
+  gemini-2.5-pro: "google/gemini-2.5-pro"
+  gemini-2.0-flash: "google/gemini-2.0-flash"
+  kimi-k2-0905: "moonshotai/kimi-k2-0905"
+  qwen3-235b-a22b: "qwen/qwen3-235b-a22b"
+  llama-4-maverick: "meta-llama/llama-4-maverick"
+  glm-4.5: "z-ai/glm-4.5"
+
+# Agent settings
+agent_config:
+  type: "OpenRouterAgent"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 60
+
+# Metrics to track
+metrics:
+  - "win_rate"
+  - "spy_win_rate"
+  - "non_spy_win_rate"
+  - "spy_detection_rate"
+  - "location_guess_accuracy"
+

@@ -1,0 +1,51 @@
+# Mini Werewolf Tournament for Testing (3 games only)
+name: "Werewolf Mini Test Tournament"
+game: "werewolf"
+
+# Game-specific settings
+game_config:
+  n_players: 5  # Will be overridden by schedule
+  n_werewolves: 1
+  include_seer: true
+  include_doctor: true
+  max_debate_turns: 5  # Fewer turns for speed (default: 10)
+  max_rounds: 20  # Shorter for testing (default: 50)
+  debate_retries: 2
+  vote_requires_majority: true
+
+# Schedule file (create a mini version)
+schedule_file: "configs/tournaments/test_werewolf_mini_schedule.csv"
+schedule_format: "werewolf"
+
+# Output settings
+output_dir: "experiments/tournaments/test_werewolf_mini"
+log_games: true
+log_private_info: true
+
+# Execution settings
+max_concurrent_games: 3  # Run games in parallel
+timeout_per_game: 3600  # 10 minutes max per game
+
+# Model name mappings
+model_mapping:
+  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  gpt-4o: "openai/gpt-4o"
+  gpt-5: "openai/gpt-5"
+
+# Agent settings
+agent_config:
+  type: "OpenRouterAgent"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 60
+
+# Metrics to track
+metrics:
+  - "win_rate"
+  - "villager_win_rate"
+  - "werewolf_win_rate"
+  - "survival_rate"
+  - "vote_accuracy"
+  - "kills_per_werewolf"
+  - "seer_accuracy"
+

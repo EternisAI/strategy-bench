@@ -1,5 +1,6 @@
 """Avalon environment implementation."""
 
+import asyncio
 import random
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -1162,7 +1163,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                 return "Evil won: Assassin killed Merlin"
             return f"Evil won: {st.quests_failed} quests failed"
 
-    def play_game(self) -> GameResult:
+    async def play_game(self) -> GameResult:
         """Play a complete game with the configured agents."""
         if not self.agents:
             raise RuntimeError("No agents configured")
@@ -1181,7 +1182,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
             if st.current_phase == Phase.TEAM_SELECTION:
                 # Only quest leader acts
                 agent = self.agents[st.quest_leader]
-                actions[st.quest_leader] = agent.act(obs[st.quest_leader])
+                actions[st.quest_leader] = await agent.act_async(obs[st.quest_leader])
             
             elif st.current_phase == Phase.TEAM_DISCUSSION:
                 # All players can discuss
@@ -1189,26 +1190,26 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                     # Check if this player has spoken this round
                     if pid not in st.spoken_this_round:
                         agent = self.agents[pid]
-                        actions[pid] = agent.act(obs[pid])
+                        actions[pid] = await agent.act_async(obs[pid])
             
             elif st.current_phase == Phase.TEAM_VOTING:
                 # All players vote
                 for pid in range(self.game_config.n_players):
                     agent = self.agents[pid]
-                    actions[pid] = agent.act(obs[pid])
+                    actions[pid] = await agent.act_async(obs[pid])
             
             elif st.current_phase == Phase.QUEST_VOTING:
                 # Only team members vote
                 if st.current_proposal:
                     for pid in st.current_proposal.team:
                         agent = self.agents[pid]
-                        actions[pid] = agent.act(obs[pid])
+                        actions[pid] = await agent.act_async(obs[pid])
             
             elif st.current_phase == Phase.ASSASSINATION:
                 # Only assassin acts
                 assassin_pid = find_assassin(st.players)
                 agent = self.agents[assassin_pid]
-                actions[assassin_pid] = agent.act(obs[assassin_pid])
+                actions[assassin_pid] = await agent.act_async(obs[assassin_pid])
             
             # Execute actions
             obs, rewards, done, info = self.step(actions)

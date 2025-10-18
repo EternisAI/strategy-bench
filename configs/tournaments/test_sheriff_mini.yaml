@@ -1,0 +1,50 @@
+# Mini Sheriff of Nottingham Tournament for Testing (3 games only)
+name: "Sheriff of Nottingham Mini Test Tournament"
+game: "sheriff"
+
+# Game-specific settings
+game_config:
+  n_players: 4
+  seed: null
+  include_royal: false  # Simplified for testing
+  hand_size: 6
+  bag_limit: 5
+  sheriff_rotations: 1  # Faster games (default: 2)
+  max_negotiation_rounds: 2
+
+# Schedule file
+schedule_file: "configs/tournaments/test_sheriff_mini_schedule.csv"
+schedule_format: "sheriff"  # Format: Round,Game,Player_1,Player_2,Player_3,Player_4
+
+# Output settings
+output_dir: "experiments/tournaments/test_sheriff_mini"
+log_games: true
+log_private_info: true
+
+# Execution settings
+max_concurrent_games: 3  # Run all games in parallel
+timeout_per_game: 600  # 10 minutes max per game
+
+# Model name mappings
+model_mapping:
+  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  gpt-4o: "openai/gpt-4o"
+  gpt-5: "openai/gpt-5"
+
+# Agent settings
+agent_config:
+  type: "OpenRouterAgent"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 60
+
+# Metrics to track
+metrics:
+  - "win_rate"
+  - "average_score"
+  - "smuggling_success_rate"
+  - "inspection_accuracy"
+  - "bribe_success_rate"
+  - "contraband_delivered"
+  - "king_queen_bonuses"
+

@@ -1,5 +1,6 @@
 """Example: Run Secret Hitler game with LLM agents."""
 
+import asyncio
 import os
 from pathlib import Path
 import yaml
@@ -9,7 +10,7 @@ from sdb.agents.llm.openrouter_agent import OpenRouterAgent
 from sdb.logging.game_logger import GameLogger
 
 
-def main():
+async def main():
     """Run Secret Hitler game with LLM agents."""
     
     # Check for API key
@@ -95,7 +96,7 @@ def main():
     print("-" * 70)
     
     # Secret Hitler has a built-in play_game() method that handles everything
-    result = env.play_game()
+    result = await env.play_game()
     
     # Show results
     print("\n" + "=" * 70)
@@ -118,5 +119,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
 

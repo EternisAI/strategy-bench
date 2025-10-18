@@ -1,5 +1,6 @@
 """Secret Hitler game environment implementation."""
 
+import asyncio
 import random
 from typing import List, Optional, Any, Dict
 
@@ -176,7 +177,7 @@ class SecretHitlerEnv(BaseEnvironment):
         
         return self.state, self.state.is_terminal
     
-    def play_game(self):
+    async def play_game(self):
         """Play complete Secret Hitler game.
         
         Returns:
@@ -185,7 +186,7 @@ class SecretHitlerEnv(BaseEnvironment):
         # Environment already initialized in __init__ (reset was called there)
         
         while not self.state.is_terminal:
-            self._run_round()
+            await self._run_round()
             
             # Check win conditions
             if self._check_game_over():
@@ -193,27 +194,27 @@ class SecretHitlerEnv(BaseEnvironment):
         
         return self._build_game_result()
     
-    def _run_round(self):
+    async def _run_round(self):
         """Run one complete round of Secret Hitler."""
         self.state.round_number += 1
         self.logger.log_round_start(self.state.round_number)
         
         # 1. Nomination Phase
-        self._nomination_phase()
+        await self._nomination_phase()
         
         # 2. Discussion Phase
-        self._discussion_phase()
+        await self._discussion_phase()
         
         # 3. Voting Phase
-        votes_passed = self._voting_phase()
+        votes_passed = await self._voting_phase()
         
         if votes_passed:
             # 4. Legislative Session
-            self._legislative_session()
+            await self._legislative_session()
             
             # 5. Presidential Power (if applicable)
             if self.state.pending_power and self.state.pending_power != PresidentialPower.NONE:
-                self._execute_presidential_power()
+                await self._execute_presidential_power()
                 
                 # Check if game ended (e.g., Hitler executed)
                 if self.state.is_terminal:
@@ -246,7 +247,7 @@ class SecretHitlerEnv(BaseEnvironment):
         # 6. Advance to next president (unless just did special election)
         self._advance_president()
     
-    def _nomination_phase(self):
+    async def _nomination_phase(self):
         """Handle nomination of chancellor."""
         self.state.phase = Phase.ELECTION_NOMINATION
         
@@ -267,7 +268,7 @@ class SecretHitlerEnv(BaseEnvironment):
             obs.data["instruction"] = prompts.get_nomination_instruction(legal_candidates, obs.data)
             
             try:
-                action = president.act(obs)
+                action = await president.act_async(obs)
                 self._log_agent_reasoning(action, self.state.president_idx)
                 
                 # FIX: Check if target is not None, not just if attribute exists
@@ -277,7 +278,7 @@ class SecretHitlerEnv(BaseEnvironment):
                     self.logger.log_error("nomination", f"Invalid nominee {nominee} from {legal_candidates}")
                     # Let the agent try again with clearer instructions
                     obs.data["error"] = f"Invalid nominee {nominee}. Must be one of {legal_candidates}"
-                    action = president.act(obs)
+                    action = await president.act_async(obs)
                     self._log_agent_reasoning(action, self.state.president_idx)
                     # FIX: Check if target is not None, not just if attribute exists
                     nominee = action.target if action.target is not None else action.data.get('nominee')
@@ -299,7 +300,7 @@ class SecretHitlerEnv(BaseEnvironment):
         # Log to terminal [[memory:7216156]]
         print(f"   👔 President {self.state.president_idx} nominates Player {nominee} for Chancellor")
     
-    def _discussion_phase(self):
+    async def _discussion_phase(self):
         """Handle pre-vote discussion where players can speak."""
         self.state.phase = Phase.ELECTION_DISCUSSION
         self.state.current_discussion = []
@@ -327,7 +328,7 @@ class SecretHitlerEnv(BaseEnvironment):
             try:
                 # Agent can make a statement (returns Action with statement in data)
                 agent = self.agents[player_id]
-                action = agent.act(obs)
+                action = await agent.act_async(obs)
                 self._log_agent_reasoning(action, player_id)
                 
                 # Extract statement from action (try multiple field names for robustness)
@@ -357,7 +358,7 @@ class SecretHitlerEnv(BaseEnvironment):
                 # If agent fails during discussion, they stay silent
                 pass
     
-    def _veto_discussion_phase(self):
+    async def _veto_discussion_phase(self):
         """Handle discussion when chancellor proposes veto."""
         self.state.phase = Phase.VETO_DISCUSSION
         
@@ -383,7 +384,7 @@ class SecretHitlerEnv(BaseEnvironment):
             
             try:
                 agent = self.agents[player_id]
-                action = agent.act(obs)
+                action = await agent.act_async(obs)
                 self._log_agent_reasoning(action, player_id)
                 
                 # Extract statement (try multiple field names for robustness)
@@ -440,7 +441,7 @@ class SecretHitlerEnv(BaseEnvironment):
         print(f"   ⚡ CHAOS! Top policy enacted: {policy_emoji} {policy.name}")
         print(f"      Board: 🔵 {self.state.liberal_policies}/5 Liberal, 🔴 {self.state.fascist_policies}/6 Fascist")
     
-    def _voting_phase(self) -> bool:
+    async def _voting_phase(self) -> bool:
         """Handle voting on government.
         
         Returns:
@@ -457,7 +458,7 @@ class SecretHitlerEnv(BaseEnvironment):
             agent = self.agents[player_id]
             
             try:
-                action = agent.act(obs)
+                action = await agent.act_async(obs)
                 self._log_agent_reasoning(action, player_id)
                 # Interpret vote from action data
                 vote_ja = action.data.get("vote", self.rng.choice([True, False]))
@@ -512,7 +513,7 @@ class SecretHitlerEnv(BaseEnvironment):
         
         return passed
     
-    def _legislative_session(self):
+    async def _legislative_session(self):
         """Handle legislative session (policy selection)."""
         self.state.phase = Phase.LEGISLATIVE_SESSION
         
@@ -527,7 +528,7 @@ class SecretHitlerEnv(BaseEnvironment):
         print(f"   🎴 President {self.state.president_idx} draws: {[p.name for p in policies]}")
         
         try:
-            action = self.agents[self.state.president_idx].act(president_obs)
+            action = await self.agents[self.state.president_idx].act_async(president_obs)
             self._log_agent_reasoning(action, self.state.president_idx)
             discard_idx = action.data.get("discard", 0)
             discard_idx = max(0, min(2, discard_idx))  # Clamp to 0-2
@@ -554,7 +555,7 @@ class SecretHitlerEnv(BaseEnvironment):
             chancellor_obs.data["veto_available"] = True
             
             try:
-                action = self.agents[self.state.last_government.chancellor].act(chancellor_obs)
+                action = await self.agents[self.state.last_government.chancellor].act_async(chancellor_obs)
                 self._log_agent_reasoning(action, self.state.last_government.chancellor)
                 
                 # Check if chancellor proposes veto
@@ -574,7 +575,7 @@ class SecretHitlerEnv(BaseEnvironment):
                     print(f"   🚨 Chancellor {self.state.last_government.chancellor} proposes VETO!")
                     
                     # Conduct veto discussion
-                    self._veto_discussion_phase()
+                    await self._veto_discussion_phase()
                     
                     # President decides whether to accept veto
                     president_obs = self.state.get_observation(self.state.president_idx)
@@ -582,7 +583,7 @@ class SecretHitlerEnv(BaseEnvironment):
                     president_obs.data["chancellor"] = self.state.last_government.chancellor
                     
                     try:
-                        pres_action = self.agents[self.state.president_idx].act(president_obs)
+                        pres_action = await self.agents[self.state.president_idx].act_async(president_obs)
                         self._log_agent_reasoning(pres_action, self.state.president_idx)
                         veto_accepted = pres_action.data.get("accept_veto", False)
                         
@@ -625,7 +626,7 @@ class SecretHitlerEnv(BaseEnvironment):
             print(f"   🎴 Chancellor {self.state.last_government.chancellor} receives: {[p.name for p in policies]}")
             
             try:
-                action = self.agents[self.state.last_government.chancellor].act(chancellor_obs)
+                action = await self.agents[self.state.last_government.chancellor].act_async(chancellor_obs)
                 self._log_agent_reasoning(action, self.state.last_government.chancellor)
                 enact_idx = action.data.get("enact", 0)
                 enact_idx = max(0, min(1, enact_idx))  # Clamp to 0-1
@@ -671,22 +672,22 @@ class SecretHitlerEnv(BaseEnvironment):
             print(f"   📜 Policy enacted: {policy_emoji} {enacted.name}")
             print(f"      Board: 🔵 {self.state.liberal_policies}/5 Liberal, 🔴 {self.state.fascist_policies}/6 Fascist")
     
-    def _execute_presidential_power(self):
+    async def _execute_presidential_power(self):
         """Execute presidential power."""
         power = self.state.pending_power
         
         if power == PresidentialPower.INVESTIGATE_LOYALTY:
-            self._power_investigate()
+            await self._power_investigate()
         elif power == PresidentialPower.EXECUTION:
-            self._power_execution()
+            await self._power_execution()
         elif power == PresidentialPower.POLICY_PEEK:
             self._power_policy_peek()
         elif power == PresidentialPower.CALL_SPECIAL_ELECTION:
-            self._power_special_election()
+            await self._power_special_election()
         
         self.state.pending_power = None
     
-    def _power_investigate(self):
+    async def _power_investigate(self):
         """Investigate a player's party membership."""
         legal_targets = [p for p in self.state.alive_players 
                         if p != self.state.president_idx and p not in self.state.investigated_players]
@@ -700,7 +701,7 @@ class SecretHitlerEnv(BaseEnvironment):
         obs.data["legal_targets"] = legal_targets
         
         try:
-            action = self.agents[self.state.president_idx].act(obs)
+            action = await self.agents[self.state.president_idx].act_async(obs)
             self._log_agent_reasoning(action, self.state.president_idx)
             target = action.target if action.target in legal_targets else self.rng.choice(legal_targets)
         except Exception:
@@ -729,7 +730,7 @@ class SecretHitlerEnv(BaseEnvironment):
         # Log to terminal
         print(f"   🔍 President {self.state.president_idx} investigates Player {target}")
     
-    def _power_execution(self):
+    async def _power_execution(self):
         """Execute a player."""
         legal_targets = [p for p in self.state.alive_players if p != self.state.president_idx]
         
@@ -741,7 +742,7 @@ class SecretHitlerEnv(BaseEnvironment):
         obs.data["legal_targets"] = legal_targets
         
         try:
-            action = self.agents[self.state.president_idx].act(obs)
+            action = await self.agents[self.state.president_idx].act_async(obs)
             self._log_agent_reasoning(action, self.state.president_idx)
             target = action.target if action.target in legal_targets else self.rng.choice(legal_targets)
         except Exception:
@@ -778,7 +779,7 @@ class SecretHitlerEnv(BaseEnvironment):
             "policies": [p.name for p in top_policies]
         })
     
-    def _power_special_election(self):
+    async def _power_special_election(self):
         """Call special election."""
         legal_targets = [p for p in self.state.alive_players if p != self.state.president_idx]
         
@@ -787,7 +788,7 @@ class SecretHitlerEnv(BaseEnvironment):
         obs.data["legal_targets"] = legal_targets
         
         try:
-            action = self.agents[self.state.president_idx].act(obs)
+            action = await self.agents[self.state.president_idx].act_async(obs)
             self._log_agent_reasoning(action, self.state.president_idx)
             target = action.target if action.target in legal_targets else self.rng.choice(legal_targets)
         except Exception:

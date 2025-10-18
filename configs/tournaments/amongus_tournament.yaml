@@ -1,0 +1,58 @@
+# Among Us Tournament Configuration
+name: "Among Us Tournament"
+game: "among_us"
+
+# Game-specific settings
+game_config:
+  n_players: 8  # Total players (will be overridden by schedule)
+  n_impostors: 2
+  tasks_per_player: 5  # Tasks each crewmate must complete
+  max_task_rounds: 100  # Maximum task phase rounds
+  discussion_rounds: 5  # Discussion rounds per meeting
+  emergency_meetings: 1  # Per player
+  kill_cooldown: 3  # Rounds between kills
+
+# Schedule file (CSV with role assignments)
+schedule_file: "configs/tournaments/amongus_tournament_schedule.csv"
+schedule_format: "amongus"  # Format: game_id,impostors,crewmates
+
+# Output settings
+output_dir: "experiments/tournaments/amongus"
+log_games: true
+log_private_info: true
+
+# Execution settings
+max_concurrent_games: 3
+timeout_per_game: 3600  # seconds (1 hour)
+
+# Model name mappings (short name -> full OpenRouter name)
+model_mapping:
+  claude-opus-4.1: "anthropic/claude-opus-4.1"
+  claude-opus-4: "anthropic/claude-opus-4"
+  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  gpt-5: "openai/gpt-5"
+  gpt-4o: "openai/gpt-4o"
+  gemini-2.5-pro: "google/gemini-2.5-pro"
+  gemini-2.0-flash: "google/gemini-2.0-flash"
+  kimi-k2-0905: "moonshotai/kimi-k2-0905"
+  qwen3-235b-a22b: "qwen/qwen3-235b-a22b"
+  llama-4-maverick: "meta-llama/llama-4-maverick"
+  glm-4.5: "z-ai/glm-4.5"
+
+# Agent settings
+agent_config:
+  type: "OpenRouterAgent"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 60
+
+# Metrics to track
+metrics:
+  - "win_rate"
+  - "impostor_win_rate"
+  - "crewmate_win_rate"
+  - "task_completion_rate"
+  - "survival_rate"
+  - "kills_per_impostor"
+  - "vote_accuracy"
+

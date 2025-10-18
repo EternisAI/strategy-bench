@@ -1,0 +1,47 @@
+# Mini Spyfall Tournament for Testing (3 games only)
+name: "Spyfall Mini Test Tournament"
+game: "spyfall"
+
+# Game-specific settings
+game_config:
+  n_players: 5  # Will be set by schedule
+  max_turns: 20  # Shorter for testing (default: 24)
+  dealer_index: 0
+  allow_followups: false
+
+# Schedule file
+schedule_file: "configs/tournaments/test_spyfall_mini_schedule.csv"
+schedule_format: "spyfall"  # Format: game_id,spy_model,player_model
+
+# Output settings
+output_dir: "experiments/tournaments/test_spyfall_mini"
+log_games: true
+log_private_info: true
+
+# Execution settings
+max_concurrent_games: 3  # Run all games in parallel
+timeout_per_game: 600  # 10 minutes max per game
+
+# Model name mappings
+model_mapping:
+  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  gpt-4o: "openai/gpt-4o"
+  gpt-5: "openai/gpt-5"
+
+# Agent settings
+agent_config:
+  type: "OpenRouterAgent"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 60
+
+# Metrics to track
+metrics:
+  - "win_rate"
+  - "spy_win_rate"
+  - "non_spy_win_rate"
+  - "spy_detection_rate"
+  - "location_guess_accuracy"
+  - "questions_asked"
+  - "accusations_made"
+

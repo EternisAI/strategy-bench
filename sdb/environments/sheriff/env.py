@@ -1143,7 +1143,7 @@ Strategy: Inspect suspicious players (big bribes, unusual declarations)!"""
         winner_score = scores.get(self.state.winner, 0)
         return f"Player {self.state.winner} won with {winner_score} points"
 
-    def play_game(self) -> GameResult:
+    async def play_game(self) -> GameResult:
         """Play a complete game with the configured agents."""
         if not self.agents:
             raise RuntimeError("No agents configured")
@@ -1164,7 +1164,7 @@ Strategy: Inspect suspicious players (big bribes, unusual declarations)!"""
             
             # Get action from agent
             agent = self.agents[active_pid]
-            action = agent.act(obs[active_pid])
+            action = await agent.act_async(obs[active_pid])
             
             # Execute action
             obs, rewards, done, info = self.step({active_pid: action})
