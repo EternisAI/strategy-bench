@@ -6,11 +6,9 @@
 
 ## What is Strategy Bench?
 
-Strategy Bench is designed to test the exact capabilities personal AI will need when representing us in messy, multi-party settings and making decisions based on incomplete information. 
+Strategy Bench is designed to test the exact capabilities personal AI will need when representing us in messy, multi-party settings and making decisions based on incomplete information. The benchmark uses strategic games where agents take actions, communicate with each other, and build world models—focusing on scenarios that combine asymmetric information, multi-party interactions, and deceptive behavior.
 
-The benchmark uses strategic games where agents take actions, communicate with each other, and make decisions based on their world model. We focus on games that combine asymmetric/incomplete information, multi-party interactions, and possible deceptive behavior that agents must account for before making decisions.
-
-This provides a crisp, high-signal way to evaluate how well AI agents can handle the complex social and strategic reasoning required in real-world scenarios when they represent human interests in the near future.
+This provides a crisp, high-signal way to evaluate how well AI agents can handle the complex social and strategic reasoning required when representing human interests in real-world scenarios.
 
 ## Supported Games
 
@@ -225,28 +223,7 @@ Bluffing and negotiation game with goods inspection.
 
 ## Supported Models
 
-Strategy Bench uses **OpenRouter** to access multiple LLM providers:
-
-### Recommended Models
-
-```bash
-# OpenAI
-openai/gpt-4o              # Best performance
-openai/gpt-4o-mini         # Fast & cheap (default)
-openai/gpt-4-turbo         # Good balance
-
-# Anthropic
-anthropic/claude-opus-4.1      # High reasoning
-anthropic/claude-3.5-sonnet    # Balanced (recommended)
-anthropic/claude-haiku         # Fast
-
-# Google
-google/gemini-2.5-pro      # Best Gemini
-google/gemini-1.5-flash    # Fast Gemini
-
-# Meta
-meta/llama-3.1-405b        # Open source
-```
+Strategy Bench uses **OpenRouter** to access multiple LLM providers.
 
 ### Cost Optimization
 
