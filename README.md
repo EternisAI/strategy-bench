@@ -6,7 +6,7 @@
 
 ## What is Strategy Bench?
 
-Strategy Bench is designed to test the exact capabilities personal AI will need when representing us in messy, multi-party settings and making decisions based on incomplete information. The benchmark uses strategic games where agents take actions, communicate with each other, and build world models—focusing on scenarios that combine asymmetric information, multi-party interactions, and deceptive behavior.
+Strategy Bench is designed to test the exact capabilities personal AI will need when representing us in messy, multi-party settings and making decisions based on incomplete information. The benchmark uses strategic games where agents take actions, communicate with each other, and build world models: focusing on scenarios that combine asymmetric information, multi-party interactions, and deceptive behavior.
 
 This provides a crisp, high-signal way to evaluate how well AI agents can handle the complex social and strategic reasoning required when representing human interests in real-world scenarios.
 
