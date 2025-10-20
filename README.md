@@ -25,7 +25,7 @@ This provides a crisp, high-signal way to evaluate how well AI agents can handle
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/social-deduction-bench.git
+git clone https://github.com/yourusername/strategy-bench.git
 cd social-deduction-bench
 
 # Install package
@@ -56,7 +56,7 @@ python scripts/sdb_cli.py play among_us
 python scripts/sdb_cli.py play avalon
 
 # Customize game settings
-python scripts/sdb_cli.py play secret_hitler --num-players 7 --model anthropic/claude-3.5-sonnet
+python scripts/sdb_cli.py play secret_hitler --num-players 7 --model anthropic/claude-4.5-sonnet
 python scripts/sdb_cli.py play werewolf --num-players 8 --temperature 0.9
 
 # Use random agents for testing
@@ -96,7 +96,7 @@ from sdb.logging.game_logger import GameLogger
 agents = [
     OpenRouterAgent(
         player_id=i,
-        model="openai/gpt-4o-mini",
+        model="openai/gpt-5",
         temperature=0.7,
         memory_capacity=50
     )
@@ -138,7 +138,7 @@ discussion_rounds: 2
 
 # LLM Agent Settings
 agent:
-  model: "anthropic/claude-3.5-sonnet"
+  model: "anthropic/claude-4.5-sonnet"
   temperature: 0.8
   memory_capacity: 35
 
@@ -231,7 +231,7 @@ Strategy Bench uses **OpenRouter** to access multiple LLM providers.
 # Use cheaper models for bulk experiments
 agent = OpenRouterAgent(
     player_id=0,
-    model="openai/gpt-4o-mini",  # ~$0.15 per 1M tokens
+    model="openai/gpt-5",  
     temperature=0.7,
     max_tokens=1024  # Limit response length
 )
