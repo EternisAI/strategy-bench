@@ -3,8 +3,8 @@
 import random
 from typing import Dict, List, Tuple
 
-from sdb.environments.among_us.config import AmongUsConfig
-from sdb.environments.among_us.types import PlayerRole, PlayerState
+from .config import AmongUsConfig
+from .types import PlayerRole, PlayerState
 
 
 def assign_roles(config: AmongUsConfig, rng: random.Random) -> List[PlayerRole]:
@@ -157,12 +157,33 @@ def validate_vote(
     if target_id is not None:
         if target_id not in alive_players:
             return False, f"Target {target_id} is not alive"
-        
-        if voter_id == target_id:
-            return False, "Cannot vote for yourself"
     
     return True, ""
 
+
+def handle_move(game, player_id: int, to_room: str):
+    """Handle movement action with validation."""
+    frm = game.map.get_player_location(player_id)
+    if not frm or not game.map.can_move_via_corridor(frm, to_room):
+        return game.error("INVALID_MOVE",
+            from_room=frm, to_room=to_room,
+            allowed=game.map.allowed_corridor_neighbors(frm) if frm else [])
+    ok = game.map.move_player(player_id, frm, to_room)
+    assert ok  # already validated
+    return game.ok("PLAYER_ACTION", action="move", player_id=player_id, from_room=frm, to_room=to_room)
+
+def handle_vent(game, player_id: int, to_room: str):
+    """Handle vent action with validation."""
+    if not game.is_impostor(player_id):
+        return game.error("VENT_NOT_ALLOWED")
+    frm = game.map.get_player_location(player_id)
+    if not frm or not game.map.can_move_via_vent(frm, to_room):
+        return game.error("INVALID_VENT",
+            from_room=frm, to_room=to_room,
+            allowed=game.map.allowed_vent_neighbors(frm) if frm else [])
+    ok = game.map.vent_player(player_id, frm, to_room)
+    assert ok
+    return game.ok("PLAYER_ACTION", action="vent", player_id=player_id, from_room=frm, to_room=to_room)
 
 def validate_emergency_call(
     caller_id: int,

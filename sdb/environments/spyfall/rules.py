@@ -9,13 +9,15 @@ from sdb.environments.spyfall.types import PlayerCard
 
 def assign_roles(
     config: SpyfallConfig,
-    rng: random.Random
+    rng: random.Random,
+    fixed_spy_index: int = None
 ) -> Tuple[str, int, Dict[int, PlayerCard]]:
     """Assign location, spy, and roles to players.
     
     Args:
         config: Game configuration
         rng: Random number generator
+        fixed_spy_index: Optional fixed spy index (for tournaments)
         
     Returns:
         Tuple of (location, spy_index, cards)
@@ -24,8 +26,11 @@ def assign_roles(
     location = rng.choice(config.locations)
     roles = config.roles_by_location[location]
     
-    # Choose spy
-    spy_index = rng.randrange(config.n_players)
+    # Choose spy (use fixed if provided, otherwise random)
+    if fixed_spy_index is not None:
+        spy_index = fixed_spy_index
+    else:
+        spy_index = rng.randrange(config.n_players)
     
     # Assign cards
     cards = {}

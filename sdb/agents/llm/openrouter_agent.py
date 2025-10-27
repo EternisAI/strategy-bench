@@ -279,8 +279,14 @@ Response Format:
             if key in observation.data:
                 team_members = observation.data[key]
                 if isinstance(team_members, list):
-                    for member_id in team_members:
-                        if member_id != self.player_id:
+                    for member in team_members:
+                        # Handle both int IDs and dict format ({"id": X, "name": Y})
+                        if isinstance(member, dict):
+                            member_id = member.get("id")
+                        else:
+                            member_id = member
+                        
+                        if member_id is not None and member_id != self.player_id:
                             self.beliefs.add_belief(
                                 subject=member_id,
                                 predicate=f"is_on_my_team",

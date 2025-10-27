@@ -7,118 +7,52 @@ including rooms, corridors, vents, and tasks locations.
 from typing import Dict, List, Set, Optional
 from dataclasses import dataclass, field
 
-# Room data with tasks and special features
+# --- Canonical Skeld data (right side has NO vents) ---
 ROOM_DATA = {
-    "Cafeteria": {
-        "tasks": ["Download Data", "Empty Garbage", "Fix Wiring"],
-        "vent_connections": ["Admin"],
-        "special_actions": ["Emergency Button"],
-    },
-    "Weapons": {
-        "tasks": ["Accept Diverted Power", "Clear Asteroids", "Download Data"],
-        "vent_connections": ["Navigation"],
-        "special_actions": [],
-    },
-    "Navigation": {
-        "tasks": [
-            "Accept Diverted Power",
-            "Chart Course",
-            "Download Data",
-            "Fix Wiring",
-            "Stabilize Steering",
-        ],
-        "vent_connections": ["Shields", "Weapons"],
-        "special_actions": [],
-    },
-    "O2": {
-        "tasks": ["Clean O2 Filter", "Empty Chute", "Accept Diverted Power"],
-        "vent_connections": [],
-        "special_actions": ["Oxygen Depleted"],
-    },
-    "Shields": {
-        "tasks": ["Accept Diverted Power", "Prime Shields"],
-        "vent_connections": ["Navigation"],
-        "special_actions": [],
-    },
-    "Communications": {
-        "tasks": ["Accept Diverted Power", "Download Data"],
-        "vent_connections": [],
-        "special_actions": ["Comms Sabotaged"],
-    },
-    "Storage": {
-        "tasks": ["Empty Garbage", "Empty Chute"],
-        "vent_connections": [],
-        "special_actions": [],
-    },
-    "Admin": {
-        "tasks": ["Fix Wiring", "Swipe Card", "Upload Data"],
-        "vent_connections": ["Cafeteria"],
-        "special_actions": ["Admin Map"],
-    },
-    "Electrical": {
-        "tasks": [
-            "Calibrate Distributor",
-            "Divert Power",
-            "Download Data",
-            "Fix Wiring",
-        ],
-        "vent_connections": ["Medbay", "Security"],
-        "special_actions": ["Fix Lights"],
-    },
-    "Lower Engine": {
-        "tasks": ["Accept Diverted Power", "Align Engine Output", "Fuel Engines"],
-        "vent_connections": ["Reactor"],
-        "special_actions": [],
-    },
-    "Security": {
-        "tasks": ["Accept Diverted Power", "Fix Wiring"],
-        "vent_connections": ["Electrical", "Medbay"],
-        "special_actions": ["Security Cameras"],
-    },
-    "Reactor": {
-        "tasks": ["Start Reactor", "Unlock Manifolds"],
-        "vent_connections": ["Upper Engine", "Lower Engine"],
-        "special_actions": ["Reactor Meltdown"],
-    },
-    "Upper Engine": {
-        "tasks": ["Accept Diverted Power", "Align Engine Output", "Fuel Engines"],
-        "vent_connections": ["Reactor"],
-        "special_actions": [],
-    },
-    "Medbay": {
-        "tasks": ["Inspect Sample", "Submit Scan"],
-        "vent_connections": ["Electrical", "Security"],
-        "special_actions": ["Medbay Scan"],
-    },
+    "Cafeteria": {"tasks": ["Download Data","Empty Garbage","Fix Wiring"],
+                  "vent_connections": [], "special_actions": ["Emergency Button"]},
+    "Weapons": {"tasks": ["Accept Diverted Power","Clear Asteroids","Download Data"],
+                "vent_connections": [], "special_actions": []},
+    "Navigation": {"tasks": ["Accept Diverted Power","Chart Course","Download Data","Fix Wiring","Stabilize Steering"],
+                   "vent_connections": [], "special_actions": []},
+    "O2": {"tasks": ["Clean O2 Filter","Empty Chute","Accept Diverted Power"],
+           "vent_connections": [], "special_actions": ["Oxygen Depleted"]},
+    "Shields": {"tasks": ["Accept Diverted Power","Prime Shields"],
+                "vent_connections": [], "special_actions": []},
+    "Communications": {"tasks": ["Accept Diverted Power","Download Data"],
+                       "vent_connections": [], "special_actions": ["Comms Sabotaged"]},
+    "Storage": {"tasks": ["Empty Garbage","Empty Chute"],
+                "vent_connections": [], "special_actions": []},
+    "Admin": {"tasks": ["Fix Wiring","Swipe Card","Upload Data"],
+              "vent_connections": [], "special_actions": ["Admin Map"]},
+    # Left-side vent triangles only:
+    "Electrical": {"tasks": ["Calibrate Distributor","Divert Power","Download Data","Fix Wiring"],
+                   "vent_connections": ["Medbay","Security"], "special_actions": ["Fix Lights"]},
+    "Lower Engine": {"tasks": ["Accept Diverted Power","Align Engine Output","Fuel Engines"],
+                     "vent_connections": ["Reactor","Upper Engine"], "special_actions": []},
+    "Security": {"tasks": ["Accept Diverted Power","Fix Wiring"],
+                 "vent_connections": ["Electrical","Medbay"], "special_actions": ["Security Cameras"]},
+    "Reactor": {"tasks": ["Start Reactor","Unlock Manifolds"],
+                "vent_connections": ["Upper Engine","Lower Engine"], "special_actions": ["Reactor Meltdown"]},
+    "Upper Engine": {"tasks": ["Accept Diverted Power","Align Engine Output","Fuel Engines"],
+                     "vent_connections": ["Reactor","Lower Engine"], "special_actions": []},
+    "Medbay": {"tasks": ["Inspect Sample","Submit Scan"],
+               "vent_connections": ["Electrical","Security"], "special_actions": ["Medbay Scan"]},
 }
 
-# Corridor connections (bi-directional)
+# --- Corridors (bi-directional). Remove invalid edges like O2↔Admin, Admin↔Electrical, Security↔Upper Engine ---
 CORRIDOR_CONNECTIONS = [
-    ("Cafeteria", "Weapons"),
-    ("Cafeteria", "Admin"),
-    ("Cafeteria", "Upper Engine"),
-    ("Cafeteria", "Medbay"),
-    ("Weapons", "Navigation"),
-    ("Weapons", "O2"),
-    ("Navigation", "Shields"),
-    ("O2", "Shields"),
-    ("O2", "Admin"),
-    ("Shields", "Communications"),
-    ("Shields", "Storage"),
-    ("Communications", "Storage"),
-    ("Storage", "Admin"),
-    ("Storage", "Electrical"),
-    ("Storage", "Lower Engine"),
-    ("Admin", "Electrical"),
-    ("Electrical", "Lower Engine"),
-    ("Lower Engine", "Security"),
-    ("Lower Engine", "Reactor"),
-    ("Lower Engine", "Upper Engine"),
-    ("Security", "Reactor"),
-    ("Security", "Upper Engine"),
-    ("Reactor", "Upper Engine"),
-    ("Upper Engine", "Medbay"),
-    ("Medbay", "Cafeteria"),
+    ("Cafeteria","Weapons"), ("Cafeteria","Admin"), ("Cafeteria","Upper Engine"), ("Cafeteria","Medbay"),
+    ("Weapons","Navigation"), ("Weapons","O2"),
+    ("Navigation","O2"),
+    ("O2","Shields"),
+    ("Shields","Communications"), ("Shields","Storage"),
+    ("Communications","Storage"),
+    ("Storage","Admin"), ("Storage","Electrical"), ("Storage","Lower Engine"),
+    ("Electrical","Lower Engine"),
+    ("Lower Engine","Security"), ("Lower Engine","Reactor"),
+    ("Reactor","Security"), ("Reactor","Upper Engine"),
+    ("Upper Engine","Medbay"),
 ]
 
 
@@ -178,11 +112,13 @@ class SpaceshipMap:
             self.corridor_graph[room1].add(room2)
             self.corridor_graph[room2].add(room1)
         
-        # Build vent graph
-        self.vent_graph: Dict[str, Set[str]] = {room: set() for room in self.rooms}
+        # In __init__, force symmetric vent graph (prevents one-way typos)
+        self.vent_graph = {room: set() for room in self.rooms}
         for room_name, room in self.rooms.items():
-            for vent_dest in room.vent_connections:
-                self.vent_graph[room_name].add(vent_dest)
+            for dst in room.vent_connections:
+                if dst in self.rooms:
+                    self.vent_graph[room_name].add(dst)
+                    self.vent_graph[dst].add(room_name)
     
     def get_room(self, room_name: str) -> Optional[Room]:
         """Get a room by name."""
@@ -214,25 +150,6 @@ class SpaceshipMap:
             return []
         return list(self.vent_graph[room_name])
     
-    def move_player(self, player_id: int, from_room: str, to_room: str) -> bool:
-        """Move a player from one room to another.
-        
-        Args:
-            player_id: ID of the player
-            from_room: Current room name
-            to_room: Destination room name
-            
-        Returns:
-            True if move was successful
-        """
-        if from_room in self.rooms:
-            self.rooms[from_room].remove_player(player_id)
-        
-        if to_room in self.rooms:
-            self.rooms[to_room].add_player(player_id)
-            return True
-        
-        return False
     
     def get_players_in_room(self, room_name: str, alive_only: bool = True) -> Set[int]:
         """Get all players in a room.
@@ -323,4 +240,39 @@ class SpaceshipMap:
             if player_id in room.players:
                 return room_name
         return None
+
+    # --- Validated movement APIs inside SpaceshipMap ---
+    def allowed_corridor_neighbors(self, room: str) -> List[str]:
+        """Get allowed corridor neighbors for a room."""
+        return sorted(self.corridor_graph.get(room, set()))
+    
+    def allowed_vent_neighbors(self, room: str) -> List[str]:
+        """Get allowed vent neighbors for a room."""
+        return sorted(self.vent_graph.get(room, set()))
+
+    def can_move_via_corridor(self, frm: str, to: str) -> bool:
+        """Check if movement via corridor is allowed."""
+        return to in self.corridor_graph.get(frm, set())
+
+    def can_move_via_vent(self, frm: str, to: str) -> bool:
+        """Check if movement via vent is allowed."""
+        return to in self.vent_graph.get(frm, set())
+
+    def move_player(self, player_id: int, frm: str, to: str) -> bool:
+        """Move a player via corridor with validation."""
+        if not self.can_move_via_corridor(frm, to): 
+            return False
+        if frm in self.rooms: 
+            self.rooms[frm].remove_player(player_id)
+        self.rooms[to].add_player(player_id)
+        return True
+
+    def vent_player(self, player_id: int, frm: str, to: str) -> bool:
+        """Move a player via vent with validation."""
+        if not self.can_move_via_vent(frm, to): 
+            return False
+        if frm in self.rooms: 
+            self.rooms[frm].remove_player(player_id)
+        self.rooms[to].add_player(player_id)
+        return True
 

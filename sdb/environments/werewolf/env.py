@@ -31,7 +31,7 @@ from sdb.logging.formats import EventType
 class WerewolfEnv(BaseEnvironment):
     """Werewolf game environment with night/day cycles."""
     
-    def __init__(self, agents, config=None, game_id=None, logger=None):
+    def __init__(self, agents, config=None, game_id=None, logger=None, role_assignment=None):
         """Initialize Werewolf environment.
         
         Args:
@@ -39,10 +39,12 @@ class WerewolfEnv(BaseEnvironment):
             config: WerewolfConfig instance
             game_id: Optional game ID
             logger: Optional GameLogger instance
+            role_assignment: Optional dict with 'villagers' and 'werewolves' player indices
         """
         config = config or WerewolfConfig()
         self.game_config = config
         self.logger = logger
+        self.role_assignment = role_assignment  # Store for use in reset()
         super().__init__(agents, config=config.__dict__, game_id=game_id, seed=getattr(config, 'seed', None))
     
     def _validate_num_players(self):
@@ -81,7 +83,35 @@ class WerewolfEnv(BaseEnvironment):
         self.state = WerewolfState()
         
         # Assign roles
-        roles = assign_roles(self.game_config)
+        if self.role_assignment:
+            # Use fixed role assignment from tournament schedule
+            villager_indices = self.role_assignment.get('villagers', [])
+            werewolf_indices = self.role_assignment.get('werewolves', [])
+            
+            # Create roles array with fixed assignments
+            roles = [None] * self.num_players
+            
+            # Assign werewolves first
+            for idx in werewolf_indices:
+                roles[idx] = Role.WEREWOLF
+            
+            # Assign special roles (Seer, Doctor) to villager slots
+            villager_roles = []
+            if self.game_config.include_seer:
+                villager_roles.append(Role.SEER)
+            if self.game_config.include_doctor:
+                villager_roles.append(Role.DOCTOR)
+            
+            # Fill remaining villager slots with regular villagers
+            n_regular_villagers = len(villager_indices) - len(villager_roles)
+            villager_roles.extend([Role.VILLAGER] * n_regular_villagers)
+            
+            # Assign villager roles to villager indices
+            for i, idx in enumerate(villager_indices):
+                roles[idx] = villager_roles[i]
+        else:
+            # Default random assignment
+            roles = assign_roles(self.game_config)
         
         # Create player states
         self.state.players = {}

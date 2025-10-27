@@ -4,18 +4,16 @@ game: "avalon"
 
 # Game-specific settings
 game_config:
-  n_players: 5  # Total players (will be overridden by schedule)
-  n_evil: 2
-  max_rounds: 50 # Auto-configured based on n_players
+  n_players: 7  # 7 players: 4 good, 3 evil
+  seed: null
   include_merlin: true
   include_percival: false
   include_morgana: false
   include_mordred: false
   include_oberon: false
-  discussion_rounds: 3
 
 # Schedule file (CSV with role assignments)
-schedule_file: "configs/tournaments/avalon_tournament_schedule.csv"
+schedule_file: "configs/tournaments/avalon-equalizer.csv"
 schedule_format: "avalon"  # Format: game_id,players,good,evil
 
 # Output settings
@@ -24,16 +22,17 @@ log_games: true
 log_private_info: true
 
 # Execution settings
-max_concurrent_games: 3
-timeout_per_game: 3600  # seconds (1 hour)
+max_concurrent_games: 42
+timeout_per_game: 7200  # seconds (1 hour)
 
 # Model name mappings
 model_mapping:
+  grok-4: "x-ai/grok-4"
   claude-opus-4.1: "anthropic/claude-opus-4.1"
   claude-opus-4: "anthropic/claude-opus-4"
-  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
-  claude-sonnet-4.5-a: "anthropic/claude-3.5-sonnet"
-  claude-sonnet-4.5-b: "anthropic/claude-3.5-sonnet"
+  claude-sonnet-4.5: "anthropic/claude-4.5-sonnet"
+  claude-sonnet-4.5-a: "anthropic/claude-4.5-sonnet"
+  claude-sonnet-4.5-b: "anthropic/claude-4.5-sonnet"
   gpt-5: "openai/gpt-5"
   gpt-4o: "openai/gpt-4o"
   gemini-2.5-pro: "google/gemini-2.5-pro"
@@ -47,7 +46,7 @@ model_mapping:
 agent_config:
   type: "OpenRouterAgent"
   temperature: 0.7
-  max_tokens: 4096
+  max_tokens: 8192
   timeout: 60
 
 # Metrics to track

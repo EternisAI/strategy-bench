@@ -61,6 +61,7 @@ class AvalonState:
     
     # Vote tracking (prevent double voting and track votes)
     team_votes_cast: set = field(default_factory=set)  # Players who voted in current team voting
+    team_votes: Dict[int, str] = field(default_factory=dict)  # player_id -> "approve"/"reject" (persistent!)
     quest_votes_by_player: Dict[int, str] = field(default_factory=dict)  # player_id -> "success"/"fail"
     quest_voters_done: set = field(default_factory=set)  # Players who completed quest voting
     

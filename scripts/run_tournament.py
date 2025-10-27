@@ -370,11 +370,17 @@ class TournamentRunner:
                         spy_idx = i
                         break
                 
+                # If spy is not in players list, pick random position and replace
+                if spy_idx is None:
+                    import random
+                    spy_idx = random.randrange(len(players))
+                    players[spy_idx] = spy_model
+                
                 games.append({
                     'game_id': row['game_id'],
                     'players': players,
                     'role_assignment': {
-                        'spy': spy_idx if spy_idx is not None else 0,
+                        'spy': spy_idx,
                     }
                 })
         return games
@@ -530,12 +536,17 @@ class TournamentRunner:
                 logger = None
             
             # Create environment with agents
-            env = EnvClass(
-                agents=agents,
-                config=env_config,
-                game_id=game_config['game_id'],
-                logger=logger
-            )
+            # Pass role_assignment if provided (for games that support it)
+            env_kwargs = {
+                'agents': agents,
+                'config': env_config,
+                'game_id': game_config['game_id'],
+                'logger': logger
+            }
+            if 'role_assignment' in game_config:
+                env_kwargs['role_assignment'] = game_config['role_assignment']
+            
+            env = EnvClass(**env_kwargs)
             
             # Run game (check if async or sync)
             if hasattr(env, 'play_game') and asyncio.iscoroutinefunction(env.play_game):

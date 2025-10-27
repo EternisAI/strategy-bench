@@ -87,14 +87,16 @@ You're calling for a vote to identify the spy!
 
 Available suspects: {available_suspects}
 
-⚠️  This requires UNANIMOUS vote from all other players!
-- If unanimous YES and correct: You win!
-- If unanimous YES but wrong: Spy wins!
-- If not unanimous: Game continues
+⚠️  This requires MAJORITY vote from other players!
+- If majority YES and correct: Non-spies win!
+- If majority YES but wrong: Spy wins!
+- If NO majority: Game continues, but you've revealed suspicion
 
 Strategy:
-- Only accuse when confident
+- Accuse when you have strong evidence
 - Consider all questions and answers
+- Look for evasive or generic answers
+- Time is running out - don't wait too long!
 - Spy can also accuse to deflect suspicion
 
 Respond with JSON:
@@ -143,11 +145,13 @@ def get_accusation_vote_instruction(suspect: int, accuser: int) -> str:
 
 Player {accuser} accused Player {suspect} of being the spy!
 
-⚠️  Vote must be UNANIMOUS to eliminate!
+⚠️  MAJORITY VOTE decides!
 
 Consider:
 - Do you think they're the spy?
 - What did they say that was suspicious?
+- Were their answers too vague or too specific?
+- Did they avoid location-specific details?
 - If wrong, spy wins immediately!
 
 Respond with JSON:

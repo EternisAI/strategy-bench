@@ -142,31 +142,47 @@ def calculate_inspection_penalty(
         return -penalty  # Negative because merchant pays
 
 
-def classify_bag(bag_card_defs: List[CardDef]) -> str:
-    """Classify bag as all_legal, mixed, or heavy_contraband for analytics.
+def classify_bag(bag_card_defs: List[CardDef], declared_type: Optional[LegalType] = None, declared_count: Optional[int] = None) -> str:
+    """Classify bag with deterministic taxonomy for analytics.
     
     Args:
         bag_card_defs: List of CardDef objects in the bag
+        declared_type: The declared legal type (if any)
+        declared_count: The declared count (if any)
         
     Returns:
-        Classification string
+        Classification string:
+        - pure_declared: all cards match declaration
+        - mixed_legal: legal goods but not all match declaration
+        - has_contraband_low: exactly 1 contraband
+        - has_contraband_high: 2+ contraband
     """
-    legal_count = 0
     contraband_count = 0
+    declared_matching_count = 0
+    legal_count = 0
     
     for card in bag_card_defs:
         if card.kind == CardKind.LEGAL:
             legal_count += 1
+            # Check if card name matches declared type's value (e.g., "apples" == LegalType.APPLES.value)
+            if declared_type and card.name == declared_type.value:
+                declared_matching_count += 1
         elif card.kind in (CardKind.CONTRABAND, CardKind.ROYAL):
             contraband_count += 1
     
-    total = len(bag_card_defs)
+    # Classification logic
     if contraband_count == 0:
-        return "all_legal"
-    elif contraband_count >= total * 0.6:  # 60%+ contraband
-        return "heavy_contraband"
-    else:
-        return "mixed"
+        # No contraband - check if all match declaration
+        if (declared_type is not None and 
+            declared_count is not None and 
+            declared_matching_count == len(bag_card_defs) == declared_count):
+            return "pure_declared"
+        else:
+            return "mixed_legal"
+    elif contraband_count == 1:
+        return "has_contraband_low"
+    else:  # contraband_count >= 2
+        return "has_contraband_high"
 
 
 def calculate_king_queen_bonuses(
@@ -327,6 +343,37 @@ def is_bag_truthful(
     return True
 
 
+def auto_fill_declaration(player_state: PlayerState, card_defs: List[CardDef]) -> None:
+    """Auto-fill declaration after auto-load to prevent None declared_type.
+    
+    Args:
+        player_state: Player state to update
+        card_defs: List of all card definitions
+    """
+    if not player_state.bag:
+        return  # No bag to declare
+    
+    # Get legal cards in bag
+    legal_cards = []
+    for card_id in player_state.bag:
+        card = card_defs[card_id]
+        if card.kind == CardKind.LEGAL:
+            legal_cards.append(card.name)
+    
+    if legal_cards:
+        # Use the first legal card type found
+        declared_type_name = legal_cards[0]
+        declared_type = LegalType(declared_type_name.lower())
+        declared_count = legal_cards.count(declared_type_name)
+        
+        player_state.declared_type = declared_type
+        player_state.declared_count = declared_count
+    else:
+        # No legal cards - set safe default
+        player_state.declared_type = LegalType.BREAD
+        player_state.declared_count = 1
+
+
 def compute_inspection_outcome(
     bag: List[int],
     declared_type: Optional[LegalType],
@@ -361,7 +408,8 @@ def compute_inspection_outcome(
     # Not truthful → collect penalties for mismatched legal and contraband
     for cid in bag:
         c = card_defs[cid]
-        if c.kind == CardKind.LEGAL and c.name == declared_type.value:
+        # Handle case where declared_type is None (invalid declaration)
+        if declared_type is not None and c.kind == CardKind.LEGAL and c.name == declared_type.value:
             # matching legal still delivered; no penalty
             delivered.append(cid)
         else:

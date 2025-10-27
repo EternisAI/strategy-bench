@@ -17,25 +17,105 @@ from typing import Dict, List, Optional, Tuple
 
 from sdb.core.base_env import BaseEnvironment
 from sdb.core.types import Action, GameResult, Observation
-from sdb.environments.among_us.config import AmongUsConfig
-from sdb.environments.among_us.map import SpaceshipMap
-from sdb.environments.among_us.rules import (
+from sdb.logging.formats import EventType
+
+from .config import AmongUsConfig
+from .map import SpaceshipMap
+from .rules import (
     assign_roles,
     check_win_condition,
     get_vote_result,
+    handle_move,
+    handle_vent,
     validate_emergency_call,
     validate_kill,
     validate_vote,
 )
-from sdb.environments.among_us.state import AmongUsState
-from sdb.environments.among_us.types import (
+from .state import (
+    AmongUsState,
+    MeetingState,
+    cast_vote,
+    close_meeting,
+    normalize_target,
+    SKIP_TOKEN,
+)
+from .types import (
     MeetingResult,
     Phase,
     PlayerRole,
     PlayerState,
     TaskRoundResult,
 )
-from sdb.logging.formats import EventType
+
+
+SKIP_TOKENS = {"skip", "none", ""}
+
+def normalize_agent_field(val):
+    """Normalize agent field values to int or None.
+    
+    Handles:
+    - integers: pass through
+    - None: pass through as None
+    - "skip"/"none"/"": convert to None
+    - "Agent_2"/"Player 3"/"3": extract integer 2 or 3
+    
+    Examples:
+        normalize_agent_field(2) -> 2
+        normalize_agent_field("Agent_2") -> 2
+        normalize_agent_field("Player 3") -> 3
+        normalize_agent_field("skip") -> None
+        normalize_agent_field("") -> None
+        normalize_agent_field(None) -> None
+    
+    Returns:
+        int or None
+    """
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in SKIP_TOKENS:
+            return None
+        # Extract digits from string like "Agent_3", "Player 3", "3"
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if digits.isdigit():
+            return int(digits)
+        return None
+    return None
+
+def normalize_target_id(target):
+    """Normalize target to player ID: 'Agent_2', 'Player 2', '2', 2 -> 2.
+    
+    Deprecated: Use normalize_agent_field() instead.
+    This is kept for backward compatibility but delegates to normalize_agent_field().
+    """
+    return normalize_agent_field(target)
+
+def normalize_payload(d: dict):
+    """Apply normalization to known fields that expect IDs."""
+    # apply to known fields that expect IDs
+    for k in ("target", "victim", "voter", "reporter"):
+        if k in d: 
+            d[k] = normalize_agent_field(d[k])
+    return d
+
+
+# Error throttling
+from time import time
+ERROR_COOLDOWN_SEC = 3.0
+_last_error_at: dict[tuple[int,str,str], float] = {}
+
+def emit_error_throttled(player_id: int, code: str, detail: str, **payload):
+    """Emit error with throttling to prevent spam."""
+    key = (player_id, code, detail)
+    now = time()
+    last = _last_error_at.get(key, 0)
+    if now - last < ERROR_COOLDOWN_SEC:
+        return  # suppress duplicate
+    _last_error_at[key] = now
+    return {"error": code, "detail": detail, **payload}
 
 
 class AmongUsEnv(BaseEnvironment):
@@ -44,7 +124,7 @@ class AmongUsEnv(BaseEnvironment):
     Features spatial movement, room-based tasks, and visibility constraints.
     """
     
-    def __init__(self, agents, config=None, game_id=None, logger=None):
+    def __init__(self, agents, config=None, game_id=None, logger=None, role_assignment=None):
         """Initialize Among Us environment.
         
         Args:
@@ -52,16 +132,60 @@ class AmongUsEnv(BaseEnvironment):
             config: AmongUsConfig instance
             game_id: Optional game ID
             logger: Optional GameLogger instance
+            role_assignment: Optional dict with 'impostors' and 'crewmates' player indices
         """
         config = config or AmongUsConfig()
         self.game_config = config
         self.rng = random.Random()
         self.ship_map = SpaceshipMap()
+        self.map = self.ship_map  # Alias for rules.py compatibility
         self.logger = logger
+        self.role_assignment = role_assignment  # Store for use in reset()
         super().__init__(agents, config=config.__dict__, game_id=game_id, seed=getattr(config, 'seed', None))
         
         # Track actions for current task round
         self.pending_task_actions: Dict[int, Action] = {}
+    
+    def error(self, error_type: str, **kwargs) -> dict:
+        """Helper method for rules.py to return error results.
+        
+        Args:
+            error_type: Type of error (e.g., "INVALID_MOVE")
+            **kwargs: Additional error context
+            
+        Returns:
+            Dict with "error" key and additional context
+        """
+        result = {"error": error_type}
+        result.update(kwargs)
+        return result
+    
+    def ok(self, event_type: str, **kwargs) -> dict:
+        """Helper method for rules.py to return success results.
+        
+        Args:
+            event_type: Type of event (e.g., "PLAYER_ACTION")
+            **kwargs: Event data
+            
+        Returns:
+            Dict with event data (no "error" key)
+        """
+        result = {"event_type": event_type}
+        result.update(kwargs)
+        return result
+    
+    def is_impostor(self, player_id: int) -> bool:
+        """Check if a player is an impostor.
+        
+        Args:
+            player_id: Player ID to check
+            
+        Returns:
+            True if player is an impostor, False otherwise
+        """
+        if player_id not in self.state.players:
+            return False
+        return self.state.players[player_id].role == PlayerRole.IMPOSTOR
     
     def _assign_tasks_to_rooms(self, player: PlayerState) -> None:
         """Assign tasks to specific rooms for a crewmate.
@@ -130,7 +254,24 @@ class AmongUsEnv(BaseEnvironment):
         self.ship_map.reset()
         
         # Assign roles
-        roles = assign_roles(self.game_config, self.rng)
+        if self.role_assignment:
+            # Use fixed role assignment from tournament schedule
+            impostor_indices = self.role_assignment.get('impostors', [])
+            crewmate_indices = self.role_assignment.get('crewmates', [])
+            
+            # Create roles array with fixed assignments
+            roles = [None] * self.num_players
+            
+            # Assign impostors
+            for idx in impostor_indices:
+                roles[idx] = PlayerRole.IMPOSTOR
+            
+            # Assign crewmates
+            for idx in crewmate_indices:
+                roles[idx] = PlayerRole.CREWMATE
+        else:
+            # Default random assignment
+            roles = assign_roles(self.game_config, self.rng)
         
         # Initialize player states
         self.state.players = {}
@@ -152,8 +293,10 @@ class AmongUsEnv(BaseEnvironment):
             
             self.state.players[i] = player
             
-            # Add player to map
-            self.ship_map.move_player(i, "", "Cafeteria")
+            # Add player to map at starting location
+            # Use add_player directly since there's no "from" location yet
+            if "Cafeteria" in self.ship_map.rooms:
+                self.ship_map.rooms["Cafeteria"].add_player(i)
         
         # Initialize state
         self.state.phase = Phase.TASK
@@ -165,6 +308,7 @@ class AmongUsEnv(BaseEnvironment):
         }
         self.state.current_meeting_statements = []
         self.state.current_votes = {}
+        self.state.meeting_history = []
         self.state.winner = None
         self.state.win_reason = ""
         
@@ -222,6 +366,26 @@ class AmongUsEnv(BaseEnvironment):
         """Execute one step of the game."""
         # Handle actions based on phase
         for player_id, action in actions.items():
+            # CRITICAL: Block dead players from taking any actions
+            if player_id not in self.state.players or not self.state.players[player_id].is_alive:
+                error_msg = "Dead players cannot take actions"
+                if player_id in self.state.players:
+                    self.state.players[player_id].last_error = error_msg
+                if self.logger:
+                    self.logger.log(
+                        EventType.ERROR,
+                        {
+                            "player_id": player_id,
+                            "error": error_msg,
+                            "error_code": "DEAD_PLAYER_ACTION_BLOCKED",
+                            "attempted_action": action.data.get("type", "unknown")
+                        }
+                    )
+                continue  # Skip this action entirely
+            
+            # Normalize action payload
+            action.data = normalize_payload(action.data)
+            
             if self.state.phase == Phase.TASK:
                 # Store action without triggering resolution yet
                 self.pending_task_actions[action.player_id] = action
@@ -274,17 +438,20 @@ class AmongUsEnv(BaseEnvironment):
             self._resolve_task_round()
     
     def _resolve_task_round(self):
-        """Resolve all task actions for this round using TWO-PHASE resolution.
+        """Resolve all task actions for this round.
         
-        Phase 1: Resolve kills based on pre-move positions
-        Phase 2: Apply movements, tasks, and reports
+        Action Resolution Order (for fairness and consistency):
+        1. Moves & Vents (all movement resolves first)
+        2. Kills (using POST-move locations - escapees get away)
+        3. Body Reports & Emergency Calls (reactions to kills)
+        4. Tasks (task completion)
+        5. Win Checks (after all actions resolved)
         
-        This prevents order-dependent kill outcomes.
+        This order gives crewmates a fair chance to escape and rewards spatial play.
         """
         result = TaskRoundResult()
         
         # 0) Snapshot start-of-round state
-        pre_loc = {pid: p.location for pid, p in self.state.players.items()}
         alive_start = set(self.state.get_alive_players())
         
         # 1) Partition actions by type (preserve arrival order)
@@ -304,22 +471,97 @@ class AmongUsEnv(BaseEnvironment):
             elif t == "call_emergency":
                 emergencies.append((pid, action))
         
-        # 2) Resolve KILLS using pre-move locations
+        # Helper: Check if player is alive
+        def _alive(pid):
+            return self.state.players[pid].is_alive
+        
+        # 2) Resolve MOVES first (all alive players)
+        for pid, action in moves:
+            if not _alive(pid):
+                continue
+            dest = action.data.get("room", "")
+            move_result = handle_move(self, pid, dest)
+            if "error" in move_result:
+                self.state.players[pid].last_error = move_result["error"]
+                throttled_error = emit_error_throttled(pid, "INVALID_MOVE", move_result["error"], allowed=move_result.get("allowed", []))
+                if throttled_error and self.logger:
+                    self.logger.log(EventType.ERROR, {
+                        "player_id": pid, 
+                        "error": move_result["error"], 
+                        "error_code": "INVALID_MOVE",
+                        "from_room": move_result.get("from_room"),
+                        "attempted_room": move_result.get("to_room"),
+                        "allowed": move_result.get("allowed", [])
+                    })
+            else:
+                # Update player location
+                from_room = self.state.players[pid].location
+                self.state.players[pid].location = dest
+                if self.logger:
+                    self.logger.log(
+                        EventType.PLAYER_ACTION,
+                        {
+                            "round": self.state.round_number,
+                            "player_id": pid,
+                            "action": "move",
+                            "from_room": from_room,
+                            "to_room": dest
+                        }
+                    )
+        
+        # 3) Resolve VENTS (all alive impostors)
+        for pid, action in vents:
+            if not _alive(pid):
+                continue
+            dest = action.data.get("room", "")
+            vent_result = handle_vent(self, pid, dest)
+            if "error" in vent_result:
+                self.state.players[pid].last_error = vent_result["error"]
+                throttled_error = emit_error_throttled(pid, "INVALID_VENT", vent_result["error"], allowed=vent_result.get("allowed", []))
+                if throttled_error and self.logger:
+                    self.logger.log(EventType.ERROR, {
+                        "player_id": pid, 
+                        "error": vent_result["error"], 
+                        "error_code": "INVALID_VENT",
+                        "from_room": vent_result.get("from_room"),
+                        "attempted_room": vent_result.get("to_room"),
+                        "allowed": vent_result.get("allowed", [])
+                    })
+            else:
+                # Update player location
+                from_room = self.state.players[pid].location
+                self.state.players[pid].location = dest
+                if self.logger:
+                    self.logger.log(
+                        EventType.PLAYER_ACTION,
+                        {
+                            "round": self.state.round_number,
+                            "player_id": pid,
+                            "action": "vent",
+                            "from_room": from_room,
+                            "to_room": dest
+                        }
+                    )
+        
+        # 4) Resolve KILLS using POST-MOVE locations (escapees get away!)
         newly_dead = set()
         for pid, action in kills:
             player = self.state.players[pid]
             if not player.is_alive:
                 continue
             
-            target = action.data.get("target")
-            # Coerce string numbers to int
-            if isinstance(target, str) and target.isdigit():
-                target = int(target)
+            # Normalize target (handles "Agent_2" -> 2)
+            target_raw = action.data.get("target")
+            target = normalize_target_id(target_raw)
             
             can_kill = self.state.can_impostor_kill(pid)
             valid, error = validate_kill(pid, target, list(alive_start), can_kill)
             
             if not valid:
+                # Improve error message to show both ID and name
+                if target is not None and isinstance(target, int) and target in self.state.players:
+                    target_name = self.state.players[target].name
+                    error = f"{error} (target: {target} = {target_name})"
                 self.state.players[pid].last_error = error
                 if self.logger:
                     self.logger.log(
@@ -328,38 +570,78 @@ class AmongUsEnv(BaseEnvironment):
                             "player_id": pid,
                             "error": error,
                             "error_code": error.replace(" ", "_").upper() if error else "UNKNOWN",
-                            "target_provided": target,
-                            "target_type": type(target).__name__
+                            "target_provided": target_raw,
+                            "target_normalized": target,
+                            "target_type": type(target_raw).__name__
                         }
                     )
                 continue
             
-            # Same-room check vs pre-round positions
-            if pre_loc.get(pid) == pre_loc.get(target):
+            # Check if target exists and is alive
+            if target not in self.state.players:
+                error_msg = f"Target player {target} ({self.state.players.get(target, 'unknown').name if target in self.state.players else 'unknown'}) does not exist"
+                self.state.players[pid].last_error = error_msg
+                if self.logger:
+                    self.logger.log(
+                        EventType.ERROR,
+                        {
+                            "player_id": pid,
+                            "error": error_msg,
+                            "error_code": "TARGET_NOT_FOUND",
+                            "target": target,
+                            "target_raw": target_raw
+                        }
+                    )
+                continue
+            
+            if not self.state.players[target].is_alive:
+                target_name = self.state.players[target].name
+                error_msg = f"Target player {target} ({target_name}) is already dead"
+                self.state.players[pid].last_error = error_msg
+                if self.logger:
+                    self.logger.log(
+                        EventType.ERROR,
+                        {
+                            "player_id": pid,
+                            "error": error_msg,
+                            "error_code": "TARGET_ALREADY_DEAD",
+                            "target": target,
+                            "target_name": target_name
+                        }
+                    )
+                continue
+            
+            # Same-room check using CURRENT (post-move) positions
+            killer_room = self.state.players[pid].location
+            target_room = self.state.players[target].location
+            
+            if killer_room == target_room:
                 self.state.players[target].is_alive = False
                 # Keep body where kill occurred
-                self.state.players[target].location = pre_loc[pid]
+                self.state.players[target].location = killer_room
                 self.state.impostor_kill_cooldowns[pid] = self.game_config.kill_cooldown
                 newly_dead.add(target)
                 result.kills.append((pid, target))
                 
+                target_name = self.state.players[target].name
                 if self.logger:
                     self.logger.log(
                         EventType.PLAYER_ACTION,
                         {
                             "round": self.state.round_number,
                             "killer": pid,
+                            "killer_name": self.state.players[pid].name,
                             "victim": target,
+                            "victim_name": target_name,
                             "action": "kill",
-                            "location": pre_loc[pid],
-                            "pre_move_kill": True
+                            "location": killer_room,
+                            "post_move_kill": True  # Flag that this is post-move
                         },
                         is_private=True
                     )
             else:
-                killer_room = pre_loc.get(pid, "unknown")
-                targ_room = pre_loc.get(target, "unknown")
-                error_msg = f"Target not in same room (killer in {killer_room}, target in {targ_room})"
+                target_name = self.state.players[target].name
+                error_msg = f"Target {target} ({target_name}) not in same room (killer in {killer_room}, target in {target_room})"
                 self.state.players[pid].last_error = error_msg
                 if self.logger:
                     self.logger.log(
@@ -369,102 +651,110 @@ class AmongUsEnv(BaseEnvironment):
                             "error": error_msg,
                             "error_code": "TARGET_DIFFERENT_ROOM",
                             "killer_location": killer_room,
-                            "target_location": targ_room
+                            "target_location": target_room,
+                            "target": target,
+                            "target_name": target_name
                         }
                     )
         
-        # 3) Resolve EMERGENCY (first valid one wins)
-        for pid, action in emergencies:
-            if pid in newly_dead or not self.state.players[pid].is_alive:
-                continue
-            player = self.state.players[pid]
-            ok, msg = validate_emergency_call(pid, player.has_called_emergency)
-            if ok:
-                player.has_called_emergency = True
-                result.emergency_called = pid
-                if self.logger:
-                    self.logger.log(
-                        EventType.PLAYER_ACTION,
-                        {
-                            "round": self.state.round_number,
-                            "player_id": pid,
-                            "action": "call_emergency"
-                        }
-                    )
-                break
-            else:
-                self.state.players[pid].last_error = msg
-                if self.logger:
-                    self.logger.log(EventType.ERROR, {"player_id": pid, "error": msg, "error_code": "EMERGENCY_UNAVAILABLE"})
+        # 5) CRITICAL WIN CHECK: Check immediately after kills resolve
+        # If impostors >= crewmates or all impostors dead, game ends NOW (no meeting)
+        if result.kills:  # Only check if kills occurred this round
+            if self._check_game_over():
+                # Game ended due to kills - store result and exit
+                self.state.task_round_results.append(result)
+                self.pending_task_actions = {}
+                return
         
         # Helper: Check if player is alive and not killed this round
-        def _alive(pid):
+        def _alive_survivor(pid):
             return self.state.players[pid].is_alive and pid not in newly_dead
         
-        # 4) Resolve MOVES for survivors only
-        for pid, action in moves:
-            if not _alive(pid):
+        # 6) Resolve BODY REPORTS (first valid reporter wins)
+        for pid, action in reports:
+            if not _alive_survivor(pid):
                 continue
             player = self.state.players[pid]
-            dest = action.data.get("room", "")
-            if self.state.can_player_move_to(pid, dest):
-                old = player.location
-                self.ship_map.move_player(pid, old, dest)
-                player.location = dest
+            victim = action.data.get("victim")
+            if victim is not None and victim in self.state.players:
+                victim_player = self.state.players[victim]
+                # Only report bodies from kills, not ejections
+                if (not victim_player.is_alive 
+                    and victim_player.location != "EJECTED" 
+                    and victim_player.location == player.location):
+                    if result.body_reported is None:  # First reporter wins
+                        result.body_reported = (pid, victim)
+                        if self.logger:
+                            self.logger.log(
+                                EventType.PLAYER_ACTION,
+                                {
+                                    "round": self.state.round_number,
+                                    "player_id": pid,
+                                    "action": "report_body",
+                                    "victim": victim,
+                                    "location": player.location
+                                }
+                            )
+                    break
+        
+        # 7) Resolve EMERGENCY (first valid one wins, but only if no body report)
+        if result.body_reported:
+            # Block all emergencies when a body report was successful
+            for pid, action in emergencies:
+                if not _alive_survivor(pid):
+                    continue
+                error_msg = "Cannot call emergency meeting - body report in progress"
+                self.state.players[pid].last_error = error_msg
+                if self.logger:
+                    self.logger.log(EventType.ERROR, {
+                        "player_id": pid, 
+                        "error": error_msg, 
+                        "error_code": "BODY_REPORT_TAKES_PRECEDENCE"
+                    })
+        else:
+            # No body report - process emergency calls
+            for pid, action in emergencies:
+                if not _alive_survivor(pid):
+                    continue
+                player = self.state.players[pid]
+                ok, msg = validate_emergency_call(pid, player.has_called_emergency)
+                if ok:
+                    player.has_called_emergency = True
+                    result.emergency_called = pid
+                    if self.logger:
+                        self.logger.log(
+                            EventType.PLAYER_ACTION,
+                            {
+                                "round": self.state.round_number,
+                                "player_id": pid,
+                                "action": "call_emergency"
+                            }
+                        )
+                    break
+                else:
+                    self.state.players[pid].last_error = msg
+                    if self.logger:
+                        self.logger.log(EventType.ERROR, {"player_id": pid, "error": msg, "error_code": "EMERGENCY_UNAVAILABLE"})
+        
+        # 8) Resolve TASKS for survivors only
+        for pid, action in tasks:
+            if not _alive_survivor(pid):
+                continue
+            player = self.state.players[pid]
+            
+            # Impostors cannot complete real tasks (they can only fake them for cover)
+            if player.role != PlayerRole.CREWMATE:
+                error_msg = "Impostors cannot complete tasks"
+                self.state.players[pid].last_error = error_msg
                 if self.logger:
                     self.logger.log(
-                        EventType.PLAYER_ACTION,
+                        EventType.ERROR,
                         {
-                            "round": self.state.round_number,
                             "player_id": pid,
-                            "action": "move",
-                            "from": old,
-                            "to": dest
+                            "error": error_msg,
+                            "error_code": "IMPOSTOR_CANNOT_COMPLETE_TASKS"
                         }
                     )
-            else:
-                error_msg = f"Invalid move to {dest}"
-                self.state.players[pid].last_error = error_msg
-                if self.logger:
-                    self.logger.log(EventType.ERROR, {"player_id": pid, "error": error_msg, "error_code": "INVALID_MOVE"})
-        
-        # 5) Resolve VENTS for survivors only
-        for pid, action in vents:
-            if not _alive(pid):
-                continue
-            player = self.state.players[pid]
-            if player.role != PlayerRole.IMPOSTOR:
-                continue
-            dest = action.data.get("room", "")
-            vent_dests = self.ship_map.get_vent_destinations(player.location)
-            if dest in vent_dests:
-                old = player.location
-                self.ship_map.move_player(pid, old, dest)
-                player.location = dest
-                if self.logger:
-                    self.logger.log(
-                        EventType.PLAYER_ACTION,
-                        {
-                            "round": self.state.round_number,
-                            "player_id": pid,
-                            "action": "vent",
-                            "from": old,
-                            "to": dest
-                        },
-                        is_private=True
-                    )
-            else:
-                error_msg = f"Invalid vent to {dest}"
-                self.state.players[pid].last_error = error_msg
-                if self.logger:
-                    self.logger.log(EventType.ERROR, {"player_id": pid, "error": error_msg, "error_code": "INVALID_VENT"})
-        
-        # 6) Resolve TASKS for survivors only
-        for pid, action in tasks:
-            if not _alive(pid):
-                continue
-            player = self.state.players[pid]
-            if player.role != PlayerRole.CREWMATE:
                 continue
             if player.tasks_completed < player.total_tasks:
                 task_name, task_room = player.assigned_tasks[player.tasks_completed]
@@ -496,34 +786,7 @@ class AmongUsEnv(BaseEnvironment):
                             }
                         )
         
-        # 7) Body reports (first valid reporter wins; don't overwrite)
-        for pid, action in reports:
-            if not _alive(pid):
-                continue
-            player = self.state.players[pid]
-            victim = action.data.get("victim")
-            if victim is not None and victim in self.state.players:
-                victim_player = self.state.players[victim]
-                # Only report bodies from kills, not ejections
-                if (not victim_player.is_alive 
-                    and victim_player.location != "EJECTED" 
-                    and victim_player.location == player.location):
-                    if result.body_reported is None:  # First reporter wins
-                        result.body_reported = (pid, victim)
-                        if self.logger:
-                            self.logger.log(
-                                EventType.PLAYER_ACTION,
-                                {
-                                    "round": self.state.round_number,
-                                    "player_id": pid,
-                                    "action": "report_body",
-                                    "victim": victim,
-                                    "location": player.location
-                                }
-                            )
-                    break
-        
-        # Store result
+        # 9) Store result and finalize round
         self.state.task_round_results.append(result)
         self.pending_task_actions = {}
         
@@ -533,13 +796,14 @@ class AmongUsEnv(BaseEnvironment):
         # Increment round
         self.state.round_number += 1
         
+        # CRITICAL WIN CHECK: Check win condition after tasks (before meeting logic)
+        # This catches task completion wins even if a meeting was also triggered
+        if self._check_game_over():
+            return
+        
         # Check for meeting trigger
         if result.body_reported or result.emergency_called:
             self._start_meeting(result)
-        else:
-            # Check win condition
-            if self._check_game_over():
-                return
             
             # Check round limit
             if self.state.round_number >= self.game_config.max_task_rounds:
@@ -559,6 +823,24 @@ class AmongUsEnv(BaseEnvironment):
     
     def _start_meeting(self, trigger: TaskRoundResult):
         """Start a meeting phase."""
+        # Add meeting to history
+        meeting_info = {
+            "caller": None,
+            "reason": "unknown",
+            "voted_out": None
+        }
+        
+        if trigger.body_reported:
+            reporter, victim = trigger.body_reported
+            meeting_info["caller"] = reporter
+            meeting_info["reason"] = "body_report"
+            meeting_info["victim"] = victim
+        elif trigger.emergency_called is not None:
+            meeting_info["caller"] = trigger.emergency_called
+            meeting_info["reason"] = "emergency"
+        
+        self.state.meeting_history.append(meeting_info)
+        
         # Log meeting start
         if self.logger:
             if trigger.body_reported:
@@ -589,10 +871,32 @@ class AmongUsEnv(BaseEnvironment):
         self.state.current_votes = {}
         self.state.discussion_round = 0
         self.state.players_spoken_this_round = set()
+        self.state.discussion_started_round = self.state.round_number  # Track when discussion started
+        self.state.discussion_attempts = 0  # Reset attempt counter
     
     def _handle_discussion_action(self, action: Action):
-        """Handle discussion phase actions."""
+        """Handle discussion phase actions with timeout mechanism."""
         action_type = action.data.get("type", "")
+        
+        # Check for discussion timeout (prevent deadlock if players don't respond)
+        discussion_duration = self.state.round_number - self.state.discussion_started_round
+        max_discussion_attempts = self.game_config.discussion_rounds * len(self.state.get_alive_players()) * 2  # 2x buffer
+        
+        if discussion_duration > 10 or self.state.discussion_attempts > max_discussion_attempts:
+            # Force move to voting after timeout
+            if self.logger:
+                self.logger.log(
+                    EventType.INFO,
+                    {
+                        "message": "Discussion timeout - moving to voting phase",
+                        "discussion_duration": discussion_duration,
+                        "discussion_attempts": self.state.discussion_attempts
+                    }
+                )
+            self.state.phase = Phase.VOTING
+            return
+        
+        self.state.discussion_attempts += 1
         
         if action_type == "discuss":
             statement = action.data.get("statement", "")
@@ -632,60 +936,104 @@ class AmongUsEnv(BaseEnvironment):
     
     def _handle_voting_action(self, action: Action):
         """Handle voting phase actions."""
-        target = action.data.get("target")  # None means skip
+        target_raw = action.data.get("target")  # None means skip
+        target = normalize_target_id(target_raw)
         
-        # Validate vote
-        alive = self.state.get_alive_players()
-        valid, error = validate_vote(action.player_id, target, alive)
+        # Use new voting system
+        if not self.state.meeting:
+            alive = self.state.get_alive_players()
+            self.state.meeting = MeetingState(alive)
+            self.state.voting_started_round = self.state.round_number  # Track when voting started
         
-        if not valid:
-            if self.logger:
+        result = cast_vote(self.state.meeting, action.player_id, target)
+        
+        if "error" in result:
+            # Improve error message to show both ID and name
+            error_msg = result["error"]
+            if "allowed" in result:
+                allowed_names = [f"{pid} ({self.state.players[pid].name})" for pid in result["allowed"] if isinstance(pid, int)]
+                error_msg += f" - Allowed targets: {', '.join(allowed_names) if allowed_names else 'skip only'}"
+            
+            throttled_error = emit_error_throttled(action.player_id, "VOTE_ERROR", error_msg, allowed=result.get("allowed", []))
+            if throttled_error and self.logger:
                 self.logger.log(
                     EventType.ERROR,
-                    {"player_id": action.player_id, "error": error}
+                    {"player_id": action.player_id, "error": error_msg, 
+                     "target_provided": target_raw,
+                     "target_normalized": target,
+                     "allowed": result.get("allowed", [])}
                 )
             return
         
-        # Record vote
-        self.state.current_votes[action.player_id] = target
-        
         # Log vote
         if self.logger:
+            target_name = self.state.players[target].name if target is not None and isinstance(target, int) else "skip"
             self.logger.log(
                 EventType.VOTE_CAST,
                 {
                     "round": self.state.round_number,
                     "voter": action.player_id,
-                    "target": target if target is not None else "skip"
+                    "voter_name": self.state.players[action.player_id].name,
+                    "target": target if target is not None else "skip",
+                    "target_name": target_name
                 },
                 is_private=True
             )
         
-        # Check if all alive players have voted
-        if len(self.state.current_votes) >= len(alive):
+        # Check if all alive players have voted OR voting timeout reached
+        voting_duration = self.state.round_number - self.state.voting_started_round
+        max_voting_rounds = 5  # Allow 5 rounds for all players to vote
+        
+        if len(self.state.meeting.ballots) >= len(self.state.meeting.alive):
+            self._resolve_voting()
+        elif voting_duration > max_voting_rounds:
+            # Force abstain votes for missing players after timeout
+            if self.logger:
+                self.logger.log(
+                    EventType.INFO,
+                    {
+                        "message": "Voting timeout - forcing skip votes for non-voters",
+                        "voting_duration": voting_duration,
+                        "votes_cast": len(self.state.meeting.ballots),
+                        "votes_needed": len(self.state.meeting.alive)
+                    }
+                )
+            # Auto-skip for players who haven't voted
+            for pid in self.state.meeting.alive:
+                if pid not in self.state.meeting.ballots:
+                    cast_vote(self.state.meeting, pid, SKIP_TOKEN)
             self._resolve_voting()
     
     def _resolve_voting(self):
         """Resolve the voting phase."""
-        ejected, is_skip = get_vote_result(self.state.current_votes)
+        if not self.state.meeting:
+            return
+            
+        result = close_meeting(self.state.meeting)
         
         # Create meeting result
-        result = MeetingResult(
+        meeting_result = MeetingResult(
             discussion_statements=self.state.current_meeting_statements,
-            votes=self.state.current_votes,
-            ejected=ejected,
-            skipped=is_skip
+            votes=result["votes"],
+            ejected=result.get("ejected"),
+            skipped=result["skipped"]
         )
-        self.state.meeting_results.append(result)
+        self.state.meeting_results.append(meeting_result)
+        
+        # Update meeting history with voting result
+        if self.state.meeting_history:
+            self.state.meeting_history[-1]["voted_out"] = result.get("ejected")
         
         # Log result
+        ejected = result.get("ejected")
+        is_skip = result["skipped"]
         if self.logger:
             self.logger.log(
                 EventType.ELECTION_RESULT,
                 {
                     "ejected": ejected,
                     "skipped": is_skip,
-                    "votes": self.state.current_votes
+                    "votes": result["votes"]
                 }
             )
         
@@ -715,6 +1063,24 @@ class AmongUsEnv(BaseEnvironment):
         # Clear meeting state
         self.state.current_meeting_statements = []
         self.state.current_votes = {}
+        self.state.meeting = None  # Clear meeting state
+        
+        # MEETING END RESET (critical for fairness):
+        # 1. Teleport all alive players to Cafeteria (standard Among Us rules)
+        # 2. Reset kill cooldowns for all impostors to full
+        for pid, player in self.state.players.items():
+            if player.is_alive:
+                # Remove from current room
+                old_loc = player.location
+                if old_loc in self.ship_map.rooms:
+                    self.ship_map.rooms[old_loc].remove_player(pid)
+                # Teleport to Cafeteria
+                player.location = "Cafeteria"
+                self.ship_map.rooms["Cafeteria"].add_player(pid)
+                
+            # Reset impostor kill cooldowns to full
+            if player.role == PlayerRole.IMPOSTOR:
+                self.state.impostor_kill_cooldowns[pid] = self.game_config.kill_cooldown
         
         # Check win condition
         if self._check_game_over():
@@ -781,7 +1147,7 @@ class AmongUsEnv(BaseEnvironment):
         Returns:
             Formatted string of all meetings and votes
         """
-        if not hasattr(self.state, 'meeting_history') or not self.state.meeting_history:
+        if not self.state.meeting_history:
             return "   (No meetings yet)"
         
         formatted = []
@@ -836,33 +1202,48 @@ class AmongUsEnv(BaseEnvironment):
             obs_data["location"] = current_location
             obs_data["adjacent_rooms"] = self.ship_map.get_adjacent_rooms(current_location)
             
-            # Visible players (same room, alive)
+            # Visible players (same room, alive) - show both ID and name
             visible_players = self.state.get_visible_players(pid)
-            obs_data["visible_players"] = [self.state.players[vpid].name for vpid in visible_players]
+            obs_data["visible_players"] = [
+                {"id": vpid, "name": self.state.players[vpid].name}
+                for vpid in visible_players
+            ]
             
             # Tasks in current room
             tasks_here = self.ship_map.get_tasks_in_room(current_location)
             obs_data["tasks_in_room"] = tasks_here
             
-            # Add role-specific info
-            if player.role == PlayerRole.CREWMATE:
-                obs_data["my_tasks"] = f"{player.tasks_completed}/{player.total_tasks}"
-                obs_data["can_call_emergency"] = not player.has_called_emergency
-                # Show assigned task locations
-                remaining_tasks = player.assigned_tasks[player.tasks_completed:]
-                obs_data["my_remaining_tasks"] = [
-                    f"{task} (in {room})" for task, room in remaining_tasks
-                ]
-            elif player.role == PlayerRole.IMPOSTOR:
-                obs_data["fellow_impostors"] = [
-                    self.state.players[imp_id].name
-                    for imp_id in self.state.get_alive_impostors()
-                    if imp_id != pid
-                ]
-                obs_data["can_kill"] = self.state.can_impostor_kill(pid)
-                obs_data["kill_cooldown"] = self.state.impostor_kill_cooldowns.get(pid, 0)
-                # Impostors can see vent connections
-                obs_data["vent_destinations"] = self.ship_map.get_vent_destinations(current_location)
+            # Add role-specific info (only for alive players)
+            if player.is_alive:
+                if player.role == PlayerRole.CREWMATE:
+                    obs_data["my_tasks"] = f"{player.tasks_completed}/{player.total_tasks}"
+                    obs_data["can_call_emergency"] = not player.has_called_emergency
+                    # Show assigned task locations
+                    remaining_tasks = player.assigned_tasks[player.tasks_completed:]
+                    obs_data["my_remaining_tasks"] = [
+                        f"{task} (in {room})" for task, room in remaining_tasks
+                    ]
+                elif player.role == PlayerRole.IMPOSTOR:
+                    obs_data["fellow_impostors"] = [
+                        {"id": imp_id, "name": self.state.players[imp_id].name}
+                        for imp_id in self.state.get_alive_impostors()
+                        if imp_id != pid
+                    ]
+                    obs_data["can_kill"] = self.state.can_impostor_kill(pid)
+                    obs_data["kill_cooldown"] = self.state.impostor_kill_cooldowns.get(pid, 0)
+                    # Impostors can see vent connections
+                    obs_data["vent_destinations"] = self.ship_map.get_vent_destinations(current_location)
+            else:
+                # Dead players have no capabilities
+                if player.role == PlayerRole.CREWMATE:
+                    obs_data["my_tasks"] = f"{player.tasks_completed}/{player.total_tasks}"
+                    obs_data["can_call_emergency"] = False
+                    obs_data["my_remaining_tasks"] = []
+                elif player.role == PlayerRole.IMPOSTOR:
+                    obs_data["can_kill"] = False
+                    obs_data["kill_cooldown"] = None
+                    obs_data["vent_destinations"] = []
+                    # Don't include fellow_impostors for dead players
             
             # Add formatted full context
             obs_data["formatted_eliminations"] = self._format_elimination_history()
@@ -957,7 +1338,8 @@ class AmongUsEnv(BaseEnvironment):
                     
                     # Kill (only if can kill and targets in same room)
                     if self.state.can_impostor_kill(pid):
-                        targets_here = [vpid for vpid in visible_players if vpid != pid]
+                        # visible_players is now a list of dicts with id and name
+                        targets_here = [vp["id"] if isinstance(vp, dict) else vp for vp in visible_players if (vp["id"] if isinstance(vp, dict) else vp) != pid]
                         if targets_here:
                             target_list = [f"Player {t} ({self.state.players[t].name})" for t in targets_here]
                             actions.append(f"{{\"type\": \"kill\", \"target\": <player_id>}} (targets: {', '.join(target_list)})")
@@ -1121,9 +1503,29 @@ class AmongUsEnv(BaseEnvironment):
                 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Collect successful actions
+                # Collect successful actions and log failures
                 for (pid, _), result in zip(act_players, results):
-                    if not isinstance(result, Exception):
+                    if isinstance(result, Exception):
+                        # Log the exception with traceback
+                        import traceback
+                        agent_name = self.agents[pid].name if pid in self.agents else f"Agent_{pid}"
+                        error_msg = f"Agent {agent_name} (ID {pid}) failed to act: {type(result).__name__}: {str(result)}"
+                        traceback_str = ''.join(traceback.format_exception(type(result), result, result.__traceback__))
+                        print(f"❌ {error_msg}")
+                        print(f"   Traceback:\n{traceback_str}")
+                        if self.logger:
+                            self.logger.log(
+                                EventType.ERROR,
+                                {
+                                    "player_id": pid,
+                                    "agent_name": agent_name,
+                                    "error_type": type(result).__name__,
+                                    "error_message": str(result),
+                                    "traceback": traceback_str,
+                                    "round": round_count
+                                }
+                            )
+                    else:
                         actions[pid] = result
             
             # Step environment

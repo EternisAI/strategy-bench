@@ -8,12 +8,12 @@ game_config:
   n_impostors: 2
   tasks_per_player: 5  # Tasks each crewmate must complete
   max_task_rounds: 100  # Maximum task phase rounds
-  discussion_rounds: 5  # Discussion rounds per meeting
+  discussion_rounds: 6  # Discussion rounds per meeting
   emergency_meetings: 1  # Per player
   kill_cooldown: 3  # Rounds between kills
 
 # Schedule file (CSV with role assignments)
-schedule_file: "configs/tournaments/amongus_tournament_schedule.csv"
+schedule_file: "configs/tournaments/amongus_full_28games.csv"
 schedule_format: "amongus"  # Format: game_id,impostors,crewmates
 
 # Output settings
@@ -22,14 +22,15 @@ log_games: true
 log_private_info: true
 
 # Execution settings
-max_concurrent_games: 3
+max_concurrent_games: 84
 timeout_per_game: 3600  # seconds (1 hour)
 
 # Model name mappings (short name -> full OpenRouter name)
 model_mapping:
+  grok-4: "x-ai/grok-4"
   claude-opus-4.1: "anthropic/claude-opus-4.1"
   claude-opus-4: "anthropic/claude-opus-4"
-  claude-sonnet-4.5: "anthropic/claude-3.5-sonnet"
+  claude-sonnet-4.5: "anthropic/claude-4.5-sonnet"
   gpt-5: "openai/gpt-5"
   gpt-4o: "openai/gpt-4o"
   gemini-2.5-pro: "google/gemini-2.5-pro"
@@ -43,8 +44,8 @@ model_mapping:
 agent_config:
   type: "OpenRouterAgent"
   temperature: 0.7
-  max_tokens: 4096
-  timeout: 60
+  max_tokens: 8192
+  timeout: 180  # Increased from 60 to 180 seconds for slower API responses
 
 # Metrics to track
 metrics:

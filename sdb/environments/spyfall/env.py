@@ -26,7 +26,7 @@ from sdb.logging.formats import EventType
 class SpyfallEnv(BaseEnvironment):
     """Spyfall game environment with Q&A and deduction mechanics."""
     
-    def __init__(self, agents, config=None, game_id=None, logger=None):
+    def __init__(self, agents, config=None, game_id=None, logger=None, role_assignment=None):
         """Initialize Spyfall environment.
         
         Args:
@@ -34,11 +34,13 @@ class SpyfallEnv(BaseEnvironment):
             config: SpyfallConfig instance
             game_id: Optional game ID
             logger: Optional GameLogger instance
+            role_assignment: Optional dict with 'spy' key specifying spy index
         """
         config = config or SpyfallConfig()
         self.game_config = config
         self.rng = random.Random()
         self.logger = logger
+        self.role_assignment = role_assignment  # Store for use in reset()
         super().__init__(agents, config=config.__dict__, game_id=game_id, seed=getattr(config, 'seed', None))
     
     def _validate_num_players(self):
@@ -82,7 +84,12 @@ class SpyfallEnv(BaseEnvironment):
         self.state = SpyfallState()
         
         # Assign roles and location
-        location, spy_index, cards = assign_roles(self.game_config, self.rng)
+        # If role_assignment provided (from tournament), use it; otherwise random
+        if self.role_assignment and 'spy' in self.role_assignment:
+            spy_index = self.role_assignment['spy']
+            location, _, cards = assign_roles(self.game_config, self.rng, fixed_spy_index=spy_index)
+        else:
+            location, spy_index, cards = assign_roles(self.game_config, self.rng)
         
         # Initialize state
         self.state.phase = Phase.QANDA

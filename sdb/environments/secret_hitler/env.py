@@ -31,6 +31,7 @@ class SecretHitlerEnv(BaseEnvironment):
         config: Optional[SecretHitlerConfig] = None,
         game_id: Optional[str] = None,
         logger: Optional[GameLogger] = None,
+        role_assignment: Optional[Dict] = None,
     ):
         """Initialize Secret Hitler environment.
         
@@ -39,6 +40,7 @@ class SecretHitlerEnv(BaseEnvironment):
             config: Game configuration
             game_id: Unique game identifier
             logger: Game logger instance
+            role_assignment: Optional dict with 'liberals' and 'fascists' player indices
         """
         config = config or SecretHitlerConfig(n_players=len(agents))
         
@@ -46,6 +48,7 @@ class SecretHitlerEnv(BaseEnvironment):
         self.game_config = config
         self.logger = logger or GameLogger(game_id=game_id or "secret_hitler", enabled=True)
         self.rng = random.Random(config.seed)
+        self.role_assignment = role_assignment  # Store for use in reset()
         
         super().__init__(agents=agents, config=config.__dict__, game_id=game_id, seed=config.seed)
         
@@ -57,12 +60,33 @@ class SecretHitlerEnv(BaseEnvironment):
         """
         # Initialize roles
         roles_config = self.game_config.get_roles()
-        roles = (
-            [Role.LIBERAL] * roles_config["liberals"] +
-            [Role.FASCIST] * roles_config["fascists"] +
-            [Role.HITLER]
-        )
-        self.rng.shuffle(roles)
+        
+        if self.role_assignment:
+            # Use fixed role assignment from tournament schedule
+            liberal_indices = self.role_assignment.get('liberals', [])
+            fascist_indices = self.role_assignment.get('fascists', [])
+            
+            # Create roles array with fixed assignments
+            roles = [None] * self.num_players
+            
+            # Assign liberals
+            for idx in liberal_indices:
+                roles[idx] = Role.LIBERAL
+            
+            # Assign fascists (last fascist will be Hitler)
+            for i, idx in enumerate(fascist_indices):
+                if i == len(fascist_indices) - 1:
+                    roles[idx] = Role.HITLER  # Last fascist is Hitler
+                else:
+                    roles[idx] = Role.FASCIST
+        else:
+            # Default random assignment
+            roles = (
+                [Role.LIBERAL] * roles_config["liberals"] +
+                [Role.FASCIST] * roles_config["fascists"] +
+                [Role.HITLER]
+            )
+            self.rng.shuffle(roles)
         
         # Create player info
         players = []

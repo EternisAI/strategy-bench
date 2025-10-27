@@ -48,6 +48,7 @@ class AvalonEnv(BaseEnvironment):
         config: Optional[AvalonConfig] = None,
         game_id: Optional[str] = None,
         logger: Optional[GameLogger] = None,
+        role_assignment: Optional[Dict] = None,
     ):
         """Initialize Avalon environment.
         
@@ -56,12 +57,14 @@ class AvalonEnv(BaseEnvironment):
             config: Game configuration
             game_id: Unique game identifier
             logger: Game logger instance
+            role_assignment: Optional dict with 'good' and 'evil' player indices
         """
         config = config or AvalonConfig(n_players=len(agents))
         
         # Set game config before calling super().__init__()
         self.game_config = config
         self.logger = logger
+        self.role_assignment = role_assignment  # Store for use in reset()
         self.rng = random.Random(config.seed)
         
         super().__init__(agents=agents, config=config.__dict__, game_id=game_id, seed=config.seed)
@@ -69,7 +72,51 @@ class AvalonEnv(BaseEnvironment):
     def reset(self) -> Dict[int, Observation]:
         """Reset the game to initial state."""
         # Assign roles
-        players = assign_roles(self.game_config, self.rng)
+        if self.role_assignment:
+            # Use fixed role assignment from tournament schedule
+            from sdb.environments.avalon.rules import get_team
+            from sdb.environments.avalon.types import Role, Team, TEAM_COMPOSITION
+            
+            good_indices = self.role_assignment.get('good', [])
+            evil_indices = self.role_assignment.get('evil', [])
+            
+            # Determine roles to assign
+            num_good, num_evil = TEAM_COMPOSITION[self.game_config.n_players]
+            
+            # Build good roles
+            good_roles = []
+            if self.game_config.include_merlin:
+                good_roles.append(Role.MERLIN)
+            if self.game_config.include_percival:
+                good_roles.append(Role.PERCIVAL)
+            while len(good_roles) < num_good:
+                good_roles.append(Role.SERVANT)
+            
+            # Build evil roles (always include Assassin first)
+            evil_roles = [Role.ASSASSIN]
+            if self.game_config.include_morgana and len(evil_roles) < num_evil:
+                evil_roles.append(Role.MORGANA)
+            if self.game_config.include_mordred and len(evil_roles) < num_evil:
+                evil_roles.append(Role.MORDRED)
+            if self.game_config.include_oberon and len(evil_roles) < num_evil:
+                evil_roles.append(Role.OBERON)
+            while len(evil_roles) < num_evil:
+                evil_roles.append(Role.MINION)
+            
+            # Create players array with fixed role assignments
+            from sdb.environments.avalon.types import PlayerState
+            players = [None] * self.game_config.n_players
+            
+            # Assign good roles
+            for i, idx in enumerate(good_indices):
+                players[idx] = PlayerState(pid=idx, role=good_roles[i], team=Team.GOOD)
+            
+            # Assign evil roles
+            for i, idx in enumerate(evil_indices):
+                players[idx] = PlayerState(pid=idx, role=evil_roles[i], team=Team.EVIL)
+        else:
+            # Default random assignment
+            players = assign_roles(self.game_config, self.rng)
         
         # Initialize state
         self.state = AvalonState(
@@ -504,6 +551,24 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         st = self.state
         action_type = action.data.get("type", "")
         
+        # Normalize common synonyms to expected action types
+        ACTION_SYNONYMS = {
+            "discussion": "discuss_team",
+            "speak": "discuss_team",
+            "statement": "discuss_team",
+            "say": "discuss_team",
+            "waiting": "wait",
+            "continue": "wait",
+            "pass": "wait",
+            "skip": "wait",
+        }
+        
+        # Normalize the action type
+        if action_type.lower() in ACTION_SYNONYMS:
+            normalized_type = ACTION_SYNONYMS[action_type.lower()]
+            action.data["type"] = normalized_type  # Update the action data
+            action_type = normalized_type
+        
         # Phase-specific action validation
         ALLOWED_ACTIONS = {
             Phase.TEAM_SELECTION: {"propose_team"},
@@ -674,6 +739,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         
         # Clear vote tracking for new proposal
         st.team_votes_cast = set()
+        st.team_votes = {}  # Clear persistent team votes dict
         st.quest_votes_by_player = {}
         st.quest_voters_done = set()
         
@@ -775,25 +841,24 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         """Handle team voting phase."""
         st = self.state
         
-        # Collect votes from all players
-        votes = {}
+        # Collect votes from all players (accumulate in STATE, not local var!)
         for pid in range(self.game_config.n_players):
             if pid in actions:
                 vote = actions[pid].data.get("vote")
                 if vote in ("approve", "reject"):
-                    votes[pid] = vote
+                    st.team_votes[pid] = vote  # Store in STATE
                     st.team_votes_cast.add(pid)  # Mark as voted
         
         # Need all votes
-        if len(votes) < self.game_config.n_players:
+        if len(st.team_votes) < self.game_config.n_players:
             return
         
-        # Count votes
-        approves = sum(1 for v in votes.values() if v == "approve")
-        rejects = sum(1 for v in votes.values() if v == "reject")
+        # Count votes (from persistent state)
+        approves = sum(1 for v in st.team_votes.values() if v == "approve")
+        rejects = sum(1 for v in st.team_votes.values() if v == "reject")
         
         # Store individual votes and tallies in proposal
-        st.current_proposal.votes = votes
+        st.current_proposal.votes = st.team_votes.copy()
         st.current_proposal.approve_votes = approves
         st.current_proposal.reject_votes = rejects
         st.current_proposal.approved = approves > rejects
@@ -808,7 +873,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                     "approves": approves,
                     "rejects": rejects,
                     "approved": st.current_proposal.approved,
-                    "votes": votes,
+                    "votes": st.team_votes,
                 }
             )
         
@@ -838,6 +903,10 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
                 st.current_proposal = None
                 st.current_phase = Phase.TEAM_SELECTION
                 st.current_round += 1
+                
+                # Clear vote tracking for rejected proposal (will be re-cleared in team_selection, but be explicit)
+                st.team_votes_cast = set()
+                st.team_votes = {}
                 
                 if self.logger:
                     self.logger.log(
@@ -1173,7 +1242,7 @@ Example: {{"type": "assassinate", "target": {good_players[0] if good_players els
         done = False
         num_rounds = 0
         
-        while not done and num_rounds < 1000:  # Safety limit
+        while not done and num_rounds < 300:  # Safety limit
             st = self.state
             
             # Collect actions based on phase

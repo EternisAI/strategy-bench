@@ -16,6 +16,106 @@ if TYPE_CHECKING:
     from sdb.environments.among_us.map import SpaceshipMap
 
 
+# Voting system constants and utilities
+SKIP_TOKEN = "skip"  # Keep for backward compatibility in observations
+
+def normalize_target(t):
+    """Accept "Agent_5", "Player 5", "5", 5, "skip" and normalize to int or None.
+    
+    Returns:
+        int | None: Player ID or None for skip
+    """
+    if t is None:
+        return None
+    if isinstance(t, int):
+        return t
+    if isinstance(t, str):
+        ts = t.strip().lower()
+        if ts in {"skip", "none", ""}:
+            return None
+        # Extract digits from "Agent_5", "Player 5", "5"
+        digits = "".join(ch for ch in ts if ch.isdigit())
+        if digits.isdigit():
+            return int(digits)
+        return None
+    return None
+
+def legal_vote_targets(alive_ids: set[int], voter_id: int) -> List[int | None]:
+    """Get legal vote targets for a voter (now includes self-vote per AU rules)."""
+    return sorted([i for i in alive_ids]) + [None]  # None = skip
+
+def cast_vote(meeting: 'MeetingState', voter_id: int, raw_target):
+    """Cast a vote with validation.
+    
+    Args:
+        meeting: Current meeting state
+        voter_id: ID of voting player
+        raw_target: Raw target (can be string, int, or None)
+        
+    Returns:
+        dict with "ok": True or "error": str
+    """
+    tgt = normalize_target(raw_target)
+    
+    # Check voter is alive
+    if voter_id not in meeting.alive:
+        return {"error": "NOT_ELIGIBLE"}
+    
+    # Check target is valid (alive or None for skip)
+    # Note: Self-voting is now allowed per Among Us rules
+    if tgt is not None and tgt not in meeting.alive:
+        return {"error": "INVALID_TARGET", "allowed": legal_vote_targets(meeting.alive, voter_id)}
+    
+    # Replacement semantics: last vote wins
+    meeting.ballots[voter_id] = tgt
+    return {"ok": True}
+
+from collections import Counter
+
+def close_meeting(meeting: 'MeetingState'):
+    """Close a meeting and determine the result.
+    
+    Returns:
+        dict with:
+            - "ejected": int (player ID) if someone is ejected
+            - "skipped": bool (True if no ejection)
+            - "votes": dict of all ballots
+    """
+    # Invariant: number of ballots <= number of alive voters
+    tally = Counter(meeting.ballots.values())
+    
+    # If no votes cast, skip
+    if not tally:
+        return {"skipped": True, "votes": {}}
+    
+    # Remove None (skip votes) from winner contention
+    non_skip = {k: v for k, v in tally.items() if k is not None}
+    
+    # If only skip votes, skip
+    if not non_skip:
+        return {"skipped": True, "votes": dict(meeting.ballots)}
+    
+    # Find player(s) with most votes
+    max_votes = max(non_skip.values())
+    top = [k for k, v in non_skip.items() if v == max_votes]
+    
+    # If tie among multiple players, skip (no ejection)
+    if len(top) > 1:
+        return {"skipped": True, "votes": dict(meeting.ballots)}
+    
+    # Single plurality winner -> eject
+    ejected = top[0]
+    return {"ejected": ejected, "skipped": False, "votes": dict(meeting.ballots)}
+
+
+@dataclass
+class MeetingState:
+    """State for a single meeting/voting session."""
+    def __init__(self, alive_ids: list[int]):
+        self.alive = set(alive_ids)
+        self.ballots: dict[int, int | None] = {}  # voter -> target_id or None (skip)
+
+
 @dataclass
 class AmongUsState:
     """Complete state of an Among Us game.
@@ -49,6 +149,15 @@ class AmongUsState:
     current_votes: Dict[int, int] = field(default_factory=dict)
     discussion_round: int = 0  # Current discussion round number
     players_spoken_this_round: set = field(default_factory=set)  # Players who spoke this round
+    meeting: Optional[MeetingState] = field(default=None)  # Current meeting state
+    
+    # Timeout tracking for phases
+    voting_started_round: int = 0  # Round number when voting started
+    discussion_started_round: int = 0  # Round number when discussion started
+    discussion_attempts: int = 0  # Number of attempts in current discussion round
+    
+    # Meeting history for formatted display
+    meeting_history: List[dict] = field(default_factory=list)  # List of meeting summaries
     
     # Game outcome
     winner: Optional[str] = None
@@ -91,9 +200,15 @@ class AmongUsState:
         return self.impostor_kill_cooldowns.get(impostor_id, 0) <= 0
     
     def decrease_kill_cooldowns(self):
-        """Decrease all impostor kill cooldowns by 1."""
+        """Decrease all impostor kill cooldowns by 1 and clean up dead impostors."""
+        alive_impostors = set(self.get_alive_impostors())
+        
         for pid in list(self.impostor_kill_cooldowns.keys()):
-            if self.impostor_kill_cooldowns[pid] > 0:
+            # Clean up dead impostors
+            if pid not in alive_impostors:
+                del self.impostor_kill_cooldowns[pid]
+            # Decrease cooldown for alive impostors
+            elif self.impostor_kill_cooldowns[pid] > 0:
                 self.impostor_kill_cooldowns[pid] -= 1
     
     # Spatial methods
